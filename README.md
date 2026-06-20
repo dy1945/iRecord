@@ -1,5 +1,7 @@
 # iRecord
 
+**English** · [简体中文](README.zh-CN.md)
+
 A native macOS screen recorder that replicates the **core capabilities** of
 [Kap](https://github.com/wulkano/kap) — without the plugin system — rebuilt from
 scratch in Swift for **high video-output performance**.
