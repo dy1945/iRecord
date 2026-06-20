@@ -1,0 +1,11 @@
+.build/
+build/
+*.xcodeproj
+.DS_Store
+*.mp4
+*.mov
+*.gif
+
+# Local tooling state
+.claude/
+.omc/
