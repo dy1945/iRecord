@@ -4,7 +4,7 @@
 
 A native macOS screen recorder rebuilt from scratch in Swift for **high video-output performance**.
 
-Where the original Kap is an Electron app that pipes frames through `ffmpeg`,
+Where the original  is an Electron app that pipes frames through `ffmpeg`,
 iRecord uses Apple's modern native stack so captured GPU surfaces flow straight
 into the hardware video encoder with no intermediate copies:
 
@@ -16,9 +16,9 @@ AVAssetWriter + VideoToolbox  →  hardware H.264 / HEVC  →  .mp4 / .mov
                                                          └→ ImageIO → .gif
 ```
 
-## The Kap flow
+## The iRecord flow
 
-iRecord follows Kap's two-phase model:
+iRecord follows iRecord's two-phase model:
 
 1. **Before recording — a floating capture toolbar.** Choosing "Select Area" dims
    every display and shows a draggable selection with a floating toolbar:
@@ -31,7 +31,7 @@ iRecord follows Kap's two-phase model:
    scale %, FPS, format (MP4 H264 / MP4 HEVC / MOV / GIF), and destination
    (Save to File… / Copy to Clipboard) — then **Convert**.
 
-## Features (Kap core parity)
+## Features (iRecord core parity)
 
 - **Capture targets**: full display, drag-to-select a custom **area** (dimmed
   overlay + floating capture toolbar), or pick a specific **application window**.
@@ -49,7 +49,7 @@ iRecord follows Kap's two-phase model:
   with a live timer while recording.
 - **Menu-bar app**: runs as an accessory (no Dock icon).
 
-> Intentionally **excluded**: Kap's plugin architecture (per the project goal).
+> Intentionally **excluded**: iRecord's plugin architecture (per the project goal).
 
 ## Requirements
 
