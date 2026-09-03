@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-一款原生 macOS 录屏工具，复刻了 [Kap](https://github.com/wulkano/kap) 的**核心能力**（不含插件系统），用 Swift 从零重写，主打**高性能视频输出**。
+一款原生 macOS 录屏工具，用 Swift 从零重写，主打**高性能视频输出**。
 
 Kap 本身是一个 Electron 应用，通过 `ffmpeg` 转码帧数据；而 iRecord 使用 Apple 现代原生技术栈，让捕获到的 GPU 画面直接进入硬件视频编码器，全程**零中间拷贝**：
 
