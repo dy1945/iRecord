@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iRecord — App Icon 方案</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "SF Pro Display", "PingFang SC", sans-serif;
+    background: #0B0C0F; color: #E8E9EC;
+    padding: 64px 48px 96px;
+  }
+  header { max-width: 1200px; margin: 0 auto 48px; }
+  .eyebrow { font-size: 13px; letter-spacing: .18em; color: #8E8F96; text-transform: uppercase; }
+  h1 { font-size: 40px; font-weight: 700; margin: 10px 0 12px; }
+  .sub { color: #A9ABB2; font-size: 16px; max-width: 640px; line-height: 1.6; }
+  .grid {
+    max-width: 1200px; margin: 0 auto;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 24px;
+  }
+  .card {
+    background: #14161B; border: 1px solid #23262E; border-radius: 20px;
+    padding: 28px; transition: transform .25s ease, border-color .25s ease;
+  }
+  .card:hover { transform: translateY(-4px); border-color: #3A3E48; }
+  .card.applied { border-color: #FF453A66; }
+  .preview { display: flex; justify-content: center; padding: 12px 0 20px; }
+  .preview img { width: 220px; height: 220px; border-radius: 24px;
+    box-shadow: 0 18px 44px rgba(0,0,0,.45); transition: transform .25s ease; }
+  .card:hover .preview img { transform: scale(1.04); }
+  .name { font-size: 19px; font-weight: 650; display: flex; align-items: center; gap: 10px; }
+  .badge {
+    font-size: 11px; font-weight: 600; color: #FF6B62; background: #FF453A1F;
+    border: 1px solid #FF453A55; padding: 3px 9px; border-radius: 999px; letter-spacing: .04em;
+  }
+  .rationale { margin-top: 10px; font-size: 14px; color: #A9ABB2; line-height: 1.65; }
+  .sizes { margin-top: 18px; padding-top: 16px; border-top: 1px solid #23262E;
+    display: flex; align-items: flex-end; gap: 16px; }
+  .sizes figure { text-align: center; }
+  .sizes img { display: block; margin: 0 auto 6px; border-radius: 22%; }
+  .sizes figcaption { font-size: 10px; color: #6E7076; }
+  footer { max-width: 1200px; margin: 56px auto 0; color: #6E7076; font-size: 13px; line-height: 1.8; }
+  code { background: #1D2026; padding: 2px 7px; border-radius: 6px; font-size: 12px; color: #C9CAD0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">iRecord · macOS App Icon</div>
+  <h1>六个设计方案</h1>
+  <p class="sub">围绕「录制红点」这一共同品牌符号展开：每个方案都包含一颗红色录制键，分别诠释
+  录屏、区域截取、滚动拼接、贴图等核心能力。底板遵循 macOS 圆角矩形（squircle）规范，1024 画布。</p>
+</header>
+
+<div class="grid">
+  <div class="card">
+    <div class="preview"><img src="variants/v1-record-lens.svg" alt="Record Lens"></div>
+    <div class="name">V1 · Record Lens</div>
+    <p class="rationale">纯几何：镜头环 + 录制红点，环上的卫星点代表「正在录制」的呼吸感。
+    最通用的录屏语义，石墨底板沉稳专业，任何尺寸下都清晰。</p>
+    <div class="sizes">
+      <figure><img src="variants/v1-record-lens.svg" width="64" height="64"><figcaption>64</figcaption></figure>
+      <figure><img src="variants/v1-record-lens.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+      <figure><img src="variants/v1-record-lens.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview"><img src="variants/v2-viewfinder.svg" alt="Viewfinder"></div>
+    <div class="name">V2 · Viewfinder</div>
+    <p class="rationale">四个选区角标 + 中央录制红点 —— 既是截图的框选，也是区域录制的起点，
+    一个符号讲完整个产品。靛蓝底板在 Dock / Finder 中辨识度高，小尺寸下结构依然完整。</p>
+    <div class="sizes">
+      <figure><img src="variants/v2-viewfinder.svg" width="64" height="64"><figcaption>64</figcaption></figure>
+      <figure><img src="variants/v2-viewfinder.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+      <figure><img src="variants/v2-viewfinder.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview"><img src="variants/v3-aperture.svg" alt="Aperture"></div>
+    <div class="name">V3 · Aperture</div>
+    <p class="rationale">六叶快门光圈环抱红点，相机光学的直觉隐喻。动势最强，
+    但叶片结构在 32px 以下会糊成白环，适合作为品牌辅助图形。</p>
+    <div class="sizes">
+      <figure><img src="variants/v3-aperture.svg" width="64" height="64"><figcaption>64</figcaption></figure>
+      <figure><img src="variants/v3-aperture.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+      <figure><img src="variants/v3-aperture.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview"><img src="variants/v4-r-lens.svg" alt="Loupe"></div>
+    <div class="name">V4 · Loupe</div>
+    <p class="rationale">放大镜 + 红色镜片：致敬截图 overlay 里的取色放大镜。
+    紫罗兰底板最有「macOS 原生」气质，但放大镜语义偏向「查看」而非「录制」。</p>
+    <div class="sizes">
+      <figure><img src="variants/v4-r-lens.svg" width="64" height="64"><figcaption>64</figcaption></figure>
+      <figure><img src="variants/v4-r-lens.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+      <figure><img src="variants/v4-r-lens.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="card applied">
+    <div class="preview"><img src="variants/v5-scroll-stack.svg" alt="Scroll Stack"></div>
+    <div class="name">V5 · Scroll Stack <span class="badge">已应用</span></div>
+    <p class="rationale">三帧层叠向下，长截图拼接的具象化；前帧中央的红点点明录制身份。
+    深青底板独特，但层叠语义只覆盖产品的一个功能面。</p>
+    <div class="sizes">
+      <figure><img src="variants/v5-scroll-stack.svg" width="64" height="64"><figcaption>64</figcaption></figure>
+      <figure><img src="variants/v5-scroll-stack.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+      <figure><img src="variants/v5-scroll-stack.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview"><img src="variants/v6-pinned-frame.svg" alt="Pinned Frame"></div>
+    <div class="name">V6 · Pinned Frame</div>
+    <p class="rationale">一颗红色图钉把截取的画框「钉」在屏幕上 —— 贴图功能的直接表达。
+    唯一的浅色底板方案，干净克制，但图钉在小尺寸下可读性一般。</p>
+    <div class="sizes">
+      <figure><img src="variants/v6-pinned-frame.svg" width="64" height="64"><figcaption>64</figcaption></figure>
+      <figure><img src="variants/v6-pinned-frame.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+      <figure><img src="variants/v6-pinned-frame.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<footer>
+  切换方案：将任一变体复制为 <code>Resources/Icon/AppIcon.svg</code>，执行
+  <code>./scripts/render_icon.sh</code> 重新生成 <code>Resources/AppIcon.icns</code>，
+  再运行 <code>./scripts/build_app.sh</code> 即可。SVG 源文件位于 <code>Resources/Icon/variants/</code>。
+</footer>
+</body>
+</html>

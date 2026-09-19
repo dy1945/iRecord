@@ -35,10 +35,12 @@ final class AppCoordinator: NSObject {
 
     private func presentPermissionAlert() {
         let alert = NSAlert()
-        alert.messageText = "Screen Recording Permission Needed"
-        alert.informativeText = "iRecord needs Screen Recording access to capture your screen. Enable it in System Settings, then try again."
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = L10n.tr("Screen Recording Permission Needed", "需要屏幕录制权限")
+        alert.informativeText = L10n.tr(
+            "iRecord needs Screen Recording access to capture your screen. Enable it in System Settings, then try again.",
+            "iRecord 需要屏幕录制权限才能采集画面。请在系统设置中开启后重试。")
+        alert.addButton(withTitle: L10n.tr("Open System Settings", "打开系统设置"))
+        alert.addButton(withTitle: L10n.tr("Cancel", "取消"))
         if alert.runModal() == .alertFirstButtonReturn {
             PermissionsManager.openScreenRecordingSettings()
         }
@@ -65,7 +67,7 @@ final class AppCoordinator: NSObject {
             let windows = await self.fetchWindows()
             let menu = NSMenu()
             if windows.isEmpty {
-                menu.addItem(withTitle: "No capturable windows", action: nil, keyEquivalent: "")
+                menu.addItem(withTitle: L10n.tr("No capturable windows", "没有可录制的窗口"), action: nil, keyEquivalent: "")
             }
             for w in windows {
                 let item = NSMenuItem(title: "\(w.appName) — \(w.title)",
@@ -113,11 +115,25 @@ final class AppCoordinator: NSObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        panel.message = "Choose where iRecord saves recordings"
+        panel.prompt = L10n.tr("Choose", "选择")
+        panel.message = L10n.tr("Choose where iRecord saves recordings", "选择 iRecord 保存录制的位置")
         panel.directoryURL = controller.outputDirectory
         if panel.runModal() == .OK, let url = panel.url {
             controller.outputDirectory = url
+        }
+    }
+
+    func chooseScreenshotDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = L10n.tr("Choose", "选择")
+        panel.message = L10n.tr("Choose where iRecord saves screenshots", "选择 iRecord 保存截图的位置")
+        panel.directoryURL = controller.screenshotDirectory
+        if panel.runModal() == .OK, let url = panel.url {
+            controller.screenshotDirectory = url
         }
     }
 
@@ -140,7 +156,7 @@ final class AppCoordinator: NSObject {
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
             let content = UNMutableNotificationContent()
-            content.title = "Recording Saved"
+            content.title = L10n.tr("Recording Saved", "录制已保存")
             content.body = url.lastPathComponent
             let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
             center.add(request)

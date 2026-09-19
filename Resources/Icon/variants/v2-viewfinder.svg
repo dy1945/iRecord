@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4650E0"/>
+      <stop offset="1" stop-color="#2A2FA0"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".14"/>
+      <stop offset=".45" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#plate)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="46" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 417 287 L 287 287 L 287 417"/>
+    <path d="M 607 287 L 737 287 L 737 417"/>
+    <path d="M 737 607 L 737 737 L 607 737"/>
+    <path d="M 417 737 L 287 737 L 287 607"/>
+  </g>
+  <!-- record dot -->
+  <circle cx="512" cy="512" r="92" fill="#FF453A"/>
+</svg>

@@ -1,18 +1,19 @@
 import SwiftUI
 import CoreGraphics
 
-/// Menu-bar popover, redesigned to the "iRecord Menu" spec: grouped translucent
-/// cards (CAPTURE / RECORDING / OUTPUT), colored icon badges, a sliding FPS
-/// segmented control, iOS-style toggles, a live status indicator, and a footer.
-/// Light/dark palettes mirror the design; the NSPopover supplies the floating
-/// chrome (arrow + material), so the cards float on top of it.
+/// Menu-bar popover — card-based redesign per the new interaction mockups:
+/// header with app icon + status pill, RECORD and SCREENSHOT sections of
+/// three action cards each (bilingual title/subtitle), an OPTIONS section
+/// (FPS + four toggle cards), and a bottom bar with the Save-to expansion,
+/// Reveal in Finder, Settings and Quit. Primary label = system language,
+/// subtitle = the other language (via `L10n`).
 struct ControlPanelView: View {
     @ObservedObject var controller = RecordingController.shared
     @ObservedObject var shortcuts = ShortcutManager.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var displays: [DisplayInfo] = ScreenInfo.displays()
     @State private var windowPickerVisible = false
-    @State private var shortcutsVisible = false
+    @State private var saveToVisible = false
     @State private var windows: [WindowInfo] = []
     @State private var loadingWindows = false
 
@@ -24,10 +25,10 @@ struct ControlPanelView: View {
 
             if controller.isRecording {
                 recordingControls.padding(.top, 4)
-            } else if shortcutsVisible {
-                ShortcutsScreen(theme: theme, onBack: { shortcutsVisible = false }).padding(.top, 2)
             } else if windowPickerVisible {
                 windowPicker.padding(.top, 2)
+            } else if saveToVisible {
+                saveToScreen.padding(.top, 2)
             } else {
                 idleContent
             }
@@ -41,238 +42,340 @@ struct ControlPanelView: View {
                     .padding(.top, 10)
             }
 
-            footer
+            bottomBar
         }
-        .padding(13)
-        .frame(width: 344)
+        .padding(14)
+        .frame(width: 372)
+        .onReceive(NotificationCenter.default.publisher(for: .iRecordShowWindowPicker)) { _ in
+            guard !controller.isRecording else { return }
+            openWindowPicker()
+        }
     }
 
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 9) {
-            ZStack {
-                Circle()
-                    .stroke(Color(red: 1, green: 0.27, blue: 0.227), lineWidth: 1.7)
-                    .frame(width: 15.5, height: 15.5)
-                Circle()
-                    .fill(Color(red: 1, green: 0.27, blue: 0.227))
-                    .frame(width: 7.3, height: 7.3)
-            }
-            .frame(width: 19, height: 19)
+        HStack(spacing: 8) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 20, height: 20)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
 
-            Text("iRecord")
-                .font(.system(size: 16, weight: .semibold))
-                .tracking(-0.1)
-                .foregroundColor(theme.textPrimary)
+            HStack(alignment: .lastTextBaseline, spacing: 5) {
+                Text("iRecord")
+                    .font(.system(size: 15, weight: .semibold))
+                    .tracking(-0.1)
+                    .foregroundColor(theme.textPrimary)
+                if let appVersion {
+                    Text("v\(appVersion)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(theme.textTertiary)
+                }
+            }
 
             Spacer(minLength: 6)
 
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(status.color)
-                    .frame(width: 7, height: 7)
-                    .shadow(color: status.color.opacity(0.5), radius: 0.5)
-                    .overlay(
-                        Circle().stroke(status.color.opacity(0.16), lineWidth: 3).frame(width: 7, height: 7)
-                    )
-                if controller.isRecording {
-                    Text(timeString(controller.elapsed))
-                        .font(.system(size: 12.5, weight: .medium, design: .monospaced))
-                        .foregroundColor(theme.textSecondary)
-                } else {
-                    Text(status.text)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundColor(theme.textSecondary)
-                }
+            statusPill
+        }
+        .padding(.horizontal, 4)
+        .padding(.bottom, 12)
+    }
+
+    private var statusPill: some View {
+        HStack(spacing: 5) {
+            Circle().fill(status.color).frame(width: 6, height: 6)
+            if controller.isRecording {
+                Text(timeString(controller.elapsed))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            } else {
+                Text(status.text)
+                    .font(.system(size: 11, weight: .semibold))
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.bottom, controller.isRecording || shortcutsVisible || windowPickerVisible ? 10 : 12)
+        .foregroundColor(status.color)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(status.color.opacity(0.14)))
+    }
+
+    private var appVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
 
     private var status: (text: String, color: Color) {
         switch controller.state {
-        case .preparing: return ("Preparing…", Color(red: 1, green: 0.62, blue: 0.04))
-        case .recording: return ("Recording", Color(red: 1, green: 0.27, blue: 0.227))
-        case .paused:    return ("Paused", Color(red: 1, green: 0.62, blue: 0.04))
-        case .finishing: return ("Saving…", Color(red: 1, green: 0.62, blue: 0.04))
-        default:         return ("Ready", Color(red: 0.20, green: 0.78, blue: 0.35))
+        case .preparing: return (L10n.tr("Preparing…", "准备中…"), Color(red: 1, green: 0.62, blue: 0.04))
+        case .recording: return (L10n.tr("Recording", "录制中"), Color(red: 1, green: 0.27, blue: 0.227))
+        case .paused:    return (L10n.tr("Paused", "已暂停"), Color(red: 1, green: 0.62, blue: 0.04))
+        case .finishing: return (L10n.tr("Saving…", "保存中…"), Color(red: 1, green: 0.62, blue: 0.04))
+        default:         return (L10n.tr("Ready", "就绪"), Color(red: 0.20, green: 0.78, blue: 0.35))
         }
     }
 
-    // MARK: Idle content (the design's three sections)
+    // MARK: Idle content — action cards + options
 
     private var idleContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("CAPTURE")
-            captureCard
-            sectionLabel("RECORDING").padding(.top, 16)
-            recordingCard
-            Text("Size, format and output FPS are set after recording.")
-                .font(.system(size: 11.5))
-                .foregroundColor(theme.textSecondary)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 8)
-                .padding(.top, 7)
-            sectionLabel("OUTPUT").padding(.top, 15)
-            outputCard
-            sectionLabel("SHORTCUTS").padding(.top, 15)
-            shortcutsEntryCard
-        }
-    }
-
-    private func sectionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold))
-            .tracking(0.55)
-            .foregroundColor(theme.textTertiary)
-            .padding(.horizontal, 8)
-            .padding(.bottom, 7)
-    }
-
-    // MARK: CAPTURE card
-
-    private var captureCard: some View {
-        card {
-            captureRow(color: Color(red: 0.04, green: 0.52, blue: 1.0), symbol: "crop",
-                       title: "Select Area…",
-                       shortcut: shortcuts.combo(for: .toggleAreaRecording)?.displayString) {
-                AppCoordinator.shared.startAreaSelection()
-            }
-            separator(inset: 52)
-            captureRow(color: Color(red: 0.37, green: 0.36, blue: 0.90), symbol: "macwindow",
-                       title: "Select Window…", shortcut: nil) {
-                openWindowPicker()
-            }
-            ForEach(Array(displays.enumerated()), id: \.element.id) { index, display in
-                separator(inset: 52)
-                captureRow(color: Color(red: 0.19, green: 0.69, blue: 0.78), symbol: "display",
-                           title: display.name,
-                           shortcut: index == 0 ? shortcuts.combo(for: .recordFullScreen)?.displayString : nil) {
-                    AppCoordinator.shared.startDisplayRecording(display.id)
+            sectionCaption("RECORD", "录制").padding(.leading, 6)
+            HStack(spacing: 10) {
+                ActionCard(theme: theme, symbol: "crop",
+                           title: L10n.tr("Area", "区域"),
+                           shortcut: shortcuts.combo(for: .toggleAreaRecording)?.displayString) {
+                    AppCoordinator.shared.startAreaSelection()
+                }
+                ActionCard(theme: theme, symbol: "macwindow",
+                           title: L10n.tr("Window", "窗口"),
+                           shortcut: shortcuts.combo(for: .recordWindow)?.displayString) {
+                    openWindowPicker()
+                }
+                ActionCard(theme: theme, symbol: "display",
+                           title: L10n.tr("Screen", "整屏"),
+                           shortcut: shortcuts.combo(for: .recordFullScreen)?.displayString) {
+                    AppCoordinator.shared.startDisplayRecording(displays.first?.id ?? CGMainDisplayID())
                 }
             }
-        }
-    }
+            .padding(.top, 8)
 
-    private func captureRow(color: Color, symbol: String, title: String,
-                            shortcut: String?, action: @escaping () -> Void) -> some View {
-        HoverRow(theme: theme, height: 46, action: action) {
-            HStack(spacing: 12) {
-                IconBadge(color: color, symbol: symbol)
-                Text(title)
-                    .font(.system(size: 15))
+            sectionCaption("SCREENSHOT", "截图").padding(.leading, 6).padding(.top, 16)
+            HStack(spacing: 10) {
+                ActionCard(theme: theme, symbol: "camera.viewfinder",
+                           title: L10n.tr("Area", "区域"),
+                           shortcut: shortcuts.combo(for: .screenshotArea)?.displayString) {
+                    ScreenshotController.shared.startRegionCapture()
+                }
+                ActionCard(theme: theme, symbol: "rectangle.expand.vertical",
+                           title: L10n.tr("Scrolling", "滚动"),
+                           shortcut: shortcuts.combo(for: .screenshotScrolling)?.displayString) {
+                    ScreenshotController.shared.startScrollingCapture()
+                }
+                ActionCard(theme: theme, symbol: "pin",
+                           title: L10n.tr("Pin", "贴图"),
+                           shortcut: shortcuts.combo(for: .pinFromClipboard)?.displayString) {
+                    PinWindowController.shared.pinFromClipboard()
+                }
+            }
+            .padding(.top, 8)
+
+            HStack {
+                sectionCaption("OPTIONS", "参数").padding(.leading, 6)
+                Spacer()
+                Text(L10n.tr("Applies to next recording", "录制前生效"))
+                    .font(.system(size: 9.5))
+                    .foregroundColor(theme.textTertiary)
+                    .padding(.trailing, 6)
+            }
+            .padding(.top, 16)
+
+            HStack {
+                Text(L10n.tr("FPS", "帧率"))
+                    .font(.system(size: 12.5, weight: .medium))
                     .foregroundColor(theme.textPrimary)
-                Spacer(minLength: 6)
-                if let shortcut, !shortcut.isEmpty {
-                    Text(shortcut)
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .foregroundColor(theme.textSecondary)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(RoundedRectangle(cornerRadius: 5).fill(theme.badgeBg))
+                Spacer()
+                FpsSegmented(theme: theme, fps: $controller.captureFPS)
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 10)
+
+            HStack(spacing: 10) {
+                ToggleCard(theme: theme, symbol: "cursorarrow.rays",
+                           label: L10n.tr("Cursor", "光标"), isOn: $controller.showsCursor)
+                ToggleCard(theme: theme, symbol: "hand.tap",
+                           label: L10n.tr("Clicks", "点击"), isOn: $controller.highlightClicks)
+                ToggleCard(theme: theme, symbol: "speaker.wave.2",
+                           label: L10n.tr("System", "系统声"), isOn: $controller.captureSystemAudio)
+                ToggleCard(theme: theme, symbol: "mic",
+                           label: L10n.tr("Mic", "麦克风"), isOn: $controller.captureMicrophone) { on in
+                    if on { Task { _ = await PermissionsManager.requestMicrophonePermission() } }
                 }
-                chevron
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    private func sectionCaption(_ en: String, _ zh: String) -> some View {
+        Text(L10n.tr(en, zh))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(theme.textPrimary)
+    }
+
+    // MARK: Save-to expansion (bottom-bar sub-screen)
+
+    private struct DirCandidate: Identifiable {
+        let id = UUID()
+        let name: String
+        let detail: String
+        let url: URL
+    }
+
+    private var saveToScreen: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionCaption("RECORD", "录制").padding(.leading, 6)
+            card {
+                let dirs = dirCandidates(current: controller.outputDirectory,
+                                         defaults: defaultRecordingDirs)
+                ForEach(Array(dirs.enumerated()), id: \.element.id) { idx, dir in
+                    if idx > 0 { separator(inset: 12) }
+                    dirRow(dir, isCurrent: dir.url == controller.outputDirectory) {
+                        controller.outputDirectory = dir.url
+                    }
+                }
+                separator(inset: 12)
+                actionRow(symbol: "plus",
+                          title: L10n.tr("Choose Other Folder…", "选择其他文件夹…")) {
+                    AppCoordinator.shared.chooseOutputDirectory()
+                }
+            }
+            .padding(.top, 8)
+
+            HStack {
+                sectionCaption("SCREENSHOT", "截图").padding(.leading, 6)
+                Spacer()
+                Text(L10n.tr("Same as recording", "同录制目录"))
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.textSecondary)
+                Toggle("", isOn: $controller.screenshotUsesRecordingDir)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(Color(red: 0.20, green: 0.78, blue: 0.35))
+            }
+            .padding(.top, 14)
+
+            card {
+                let dirs = dirCandidates(current: controller.screenshotDirectory,
+                                         defaults: defaultScreenshotDirs)
+                ForEach(Array(dirs.enumerated()), id: \.element.id) { idx, dir in
+                    if idx > 0 { separator(inset: 12) }
+                    dirRow(dir, isCurrent: !controller.screenshotUsesRecordingDir
+                           && dir.url == controller.screenshotDirectory) {
+                        controller.screenshotDirectory = dir.url
+                    }
+                }
+                separator(inset: 12)
+                actionRow(symbol: "plus",
+                          title: L10n.tr("Choose Other Folder…", "选择其他文件夹…")) {
+                    AppCoordinator.shared.chooseScreenshotDirectory()
+                }
+            }
+            .padding(.top, 8)
+            .opacity(controller.screenshotUsesRecordingDir ? 0.45 : 1)
+            .disabled(controller.screenshotUsesRecordingDir)
+
+            card {
+                actionRow(symbol: "folder",
+                          title: L10n.tr("Reveal in Finder", "在访达中打开")) {
+                    NSWorkspace.shared.open(controller.outputDirectory)
+                }
+                separator(inset: 12)
+                actionRow(symbol: "gearshape",
+                          title: L10n.tr("More Settings…", "更多设置…"),
+                          subtitle: L10n.tr("Naming / Format / Shortcuts", "命名 / 格式 / 快捷键")) {
+                    saveToVisible = false
+                    SettingsWindowController.shared.show(tab: .save)
+                }
+            }
+            .padding(.top, 12)
+
+            Text(L10n.tr("Recordings and screenshots each have a folder; deeper options live in Settings.",
+                         "录制与截图各有目录，可勾选同一目录；深配置走「更多设置…」"))
+                .font(.system(size: 9.5))
+                .foregroundColor(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 6)
+                .padding(.top, 8)
+        }
+    }
+
+    private var defaultRecordingDirs: [(String, URL)] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            (L10n.tr("Movies", "影片"), home.appendingPathComponent("Movies")),
+            (L10n.tr("Desktop", "桌面"), home.appendingPathComponent("Desktop"))
+        ]
+    }
+
+    private var defaultScreenshotDirs: [(String, URL)] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            (L10n.tr("Pictures", "图片"), home.appendingPathComponent("Pictures")),
+            (L10n.tr("Desktop", "桌面"), home.appendingPathComponent("Desktop"))
+        ]
+    }
+
+    /// Custom current folder first (when it is not one of the defaults),
+    /// then the standard locations, de-duplicated.
+    private func dirCandidates(current: URL, defaults: [(String, URL)]) -> [DirCandidate] {
+        var result: [DirCandidate] = []
+        let isDefault = defaults.contains { $0.1 == current }
+        if !isDefault {
+            result.append(DirCandidate(name: current.lastPathComponent,
+                                       detail: abbreviate(current), url: current))
+        }
+        for (name, url) in defaults {
+            result.append(DirCandidate(name: name, detail: abbreviate(url), url: url))
+        }
+        return result
+    }
+
+    private func abbreviate(_ url: URL) -> String {
+        (url.path as NSString).abbreviatingWithTildeInPath
+    }
+
+    private func dirRow(_ dir: DirCandidate, isCurrent: Bool,
+                        action: @escaping () -> Void) -> some View {
+        HoverRow(theme: theme, height: 34, action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: "folder")
+                    .font(.system(size: 13))
+                    .foregroundColor(theme.textSecondary)
+                Text(dir.name)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundColor(theme.textPrimary)
+                    .lineLimit(1)
+                Text(dir.detail)
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                if isCurrent {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.accentColor)
+                }
             }
             .padding(.horizontal, 12)
         }
     }
 
-    // MARK: RECORDING card
-
-    private var recordingCard: some View {
-        card {
-            HStack {
-                Text("Capture FPS").font(.system(size: 15)).foregroundColor(theme.textPrimary)
-                Spacer()
-                FpsSegmented(theme: theme, fps: $controller.captureFPS)
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 46)
-
-            separator(inset: 14)
-            toggleRow("Show cursor", isOn: $controller.showsCursor)
-            separator(inset: 14)
-            toggleRow("Highlight clicks", isOn: $controller.highlightClicks)
-            separator(inset: 14)
-            toggleRow("System audio", isOn: $controller.captureSystemAudio)
-            separator(inset: 14)
-            toggleRow("Microphone", isOn: $controller.captureMicrophone) { on in
-                if on { Task { _ = await PermissionsManager.requestMicrophonePermission() } }
-            }
-        }
-    }
-
-    private func toggleRow(_ title: String, isOn: Binding<Bool>,
-                           onChange: ((Bool) -> Void)? = nil) -> some View {
-        HStack {
-            Text(title).font(.system(size: 15)).foregroundColor(theme.textPrimary)
-            Spacer()
-            Toggle("", isOn: isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .tint(Color(red: 0.20, green: 0.78, blue: 0.35))
-                .onChange(of: isOn.wrappedValue) { value in onChange?(value) }
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 44)
-    }
-
-    // MARK: OUTPUT card
-
-    private var outputCard: some View {
-        card {
-            HStack(spacing: 8) {
-                Text("Save to").font(.system(size: 14)).foregroundColor(theme.textSecondary)
-                Text(controller.outputDirectory.lastPathComponent)
-                    .font(.system(size: 14, weight: .medium))
+    private func actionRow(symbol: String, title: String, subtitle: String? = nil,
+                           action: @escaping () -> Void) -> some View {
+        HoverRow(theme: theme, height: 34, action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: symbol)
+                    .font(.system(size: 12))
+                    .foregroundColor(theme.textSecondary)
+                    .frame(width: 15)
+                Text(title)
+                    .font(.system(size: 12.5, weight: .medium))
                     .foregroundColor(theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(controller.outputDirectory.path)
-                Button {
-                    AppCoordinator.shared.chooseOutputDirectory()
-                } label: {
-                    Text("Change…")
-                        .font(.system(size: 13))
-                        .foregroundColor(theme.textPrimary)
-                        .padding(.horizontal, 13).padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6).fill(theme.btnBg)
-                                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.btnBorder, lineWidth: 0.5))
-                        )
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 9.5))
+                        .foregroundColor(theme.textTertiary)
+                        .lineLimit(1)
                 }
-                .buttonStyle(.plain)
+                Spacer()
             }
-            .padding(.horizontal, 14)
-            .frame(height: 48)
-        }
-    }
-
-    // MARK: Keyboard shortcuts entry
-
-    private var shortcutsEntryCard: some View {
-        card {
-            HoverRow(theme: theme, height: 46, action: { shortcutsVisible = true }) {
-                HStack(spacing: 12) {
-                    IconBadge(color: Color(red: 0.56, green: 0.56, blue: 0.58), symbol: "keyboard")
-                    Text("Keyboard Shortcuts")
-                        .font(.system(size: 15))
-                        .foregroundColor(theme.textPrimary)
-                    Spacer(minLength: 6)
-                    chevron
-                }
-                .padding(.horizontal, 12)
-            }
+            .padding(.horizontal, 12)
         }
     }
 
     // MARK: Window picker (sub-screen)
 
     private func openWindowPicker() {
+        saveToVisible = false
         windowPickerVisible = true
         loadingWindows = true
         windows = []
@@ -290,13 +393,14 @@ struct ControlPanelView: View {
             HStack {
                 backButton { windowPickerVisible = false }
                 Spacer()
-                Text("Select Window").font(.system(size: 13, weight: .semibold)).foregroundColor(theme.textSecondary)
+                Text(L10n.tr("Select Window", "选择窗口"))
+                    .font(.system(size: 13, weight: .semibold)).foregroundColor(theme.textSecondary)
                 Spacer()
                 if loadingWindows { ProgressView().controlSize(.small) } else { Color.clear.frame(width: 44, height: 1) }
             }
 
             if !loadingWindows && windows.isEmpty {
-                Text("No capturable windows found.")
+                Text(L10n.tr("No capturable windows found.", "未找到可录制的窗口。"))
                     .font(.system(size: 12)).foregroundColor(theme.textSecondary)
                     .padding(.horizontal, 8)
             }
@@ -326,58 +430,225 @@ struct ControlPanelView: View {
         }
     }
 
-    // MARK: Recording controls (active state)
+    // MARK: Recording controls (active state, per mockup 状态A)
 
     private var recordingControls: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Button { controller.stopRecording() } label: {
-                    Label("Stop", systemImage: "stop.fill").frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 0) {
+            card {
+                HStack(alignment: .lastTextBaseline, spacing: 7) {
+                    Text(timeString(controller.elapsed))
+                        .font(.system(size: 34, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.textPrimary)
+                    Text(L10n.tr("recorded", "已录制"))
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.textTertiary)
+                    Spacer()
+                    Text(Self.formatSize(controller.recordingFileSize))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(theme.textSecondary)
                 }
-                .buttonStyle(.borderedProminent).tint(Color(red: 1, green: 0.27, blue: 0.227)).controlSize(.large)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
 
-                Button { controller.togglePause() } label: {
-                    Label(controller.isPaused ? "Resume" : "Pause",
-                          systemImage: controller.isPaused ? "play.fill" : "pause.fill")
+                HStack(spacing: 10) {
+                    Button { controller.stopRecording() } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 12, weight: .bold))
+                            Text(L10n.tr("Stop & Save", "停止并保存"))
+                                .font(.system(size: 13.5, weight: .semibold))
+                            if let s = shortcuts.combo(for: .toggleAreaRecording)?.displayString {
+                                Text(s)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .opacity(0.85)
+                            }
+                        }
+                        .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color(red: 0.875, green: 0.227, blue: 0.173))
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    squareControl(symbol: controller.isPaused ? "play.fill" : "pause.fill",
+                                  tip: controller.isPaused ? L10n.tr("Resume", "继续") : L10n.tr("Pause", "暂停")) {
+                        controller.togglePause()
+                    }
+                    .disabled({ if case .preparing = controller.state { return true } else { return false } }())
+
+                    squareControl(symbol: "xmark", tip: L10n.tr("Discard recording", "放弃录制")) {
+                        confirmDiscard()
+                    }
                 }
-                .buttonStyle(.bordered).controlSize(.large)
-                .disabled({ if case .preparing = controller.state { return true } else { return false } }())
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                Text(sessionChips)
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.textTertiary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 11)
+                    .padding(.bottom, 14)
             }
-            Text(status.text).font(.system(size: 12)).foregroundColor(theme.textSecondary)
+
+            HStack(spacing: 10) {
+                ActionCard(theme: theme, symbol: "camera.viewfinder",
+                           title: L10n.tr("Area", "区域"),
+                           shortcut: nil) {}
+                ActionCard(theme: theme, symbol: "rectangle.expand.vertical",
+                           title: L10n.tr("Scrolling", "滚动"),
+                           shortcut: nil) {}
+                ActionCard(theme: theme, symbol: "pin",
+                           title: L10n.tr("Pin", "贴图"),
+                           shortcut: nil) {}
+            }
+            .disabled(true)
+            .opacity(0.35)
+            .padding(.top, 12)
+
+            Text(L10n.tr("Other actions and options are greyed out while recording; they return after stop.",
+                         "录制期间其余入口与参数置灰，停止后恢复"))
+                .font(.system(size: 9.5))
+                .foregroundColor(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 6)
+                .padding(.top, 8)
         }
-        .padding(.horizontal, 4)
-        .padding(.bottom, 4)
+        .padding(.horizontal, 2)
+        .padding(.bottom, 2)
     }
 
-    // MARK: Footer
+    private func squareControl(symbol: String, tip: String,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(theme.textPrimary)
+                .frame(width: 44, height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(theme.btnBg)
+                        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(theme.btnBorder, lineWidth: 0.5))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(tip)
+    }
 
-    private var footer: some View {
-        HStack {
+    private var sessionChips: String {
+        var parts: [String] = []
+        if let info = controller.sessionInfo {
+            let size: String
+            if let s = info.size {
+                size = " \(Int(s.width))×\(Int(s.height))"
+            } else {
+                size = ""
+            }
+            switch info.mode {
+            case .area:    parts.append(L10n.tr("Area", "区域") + size)
+            case .window:  parts.append(L10n.tr("Window", "窗口") + size)
+            case .display: parts.append(L10n.tr("Display", "整屏") + size)
+            }
+        }
+        parts.append("\(controller.captureFPS) fps")
+        func onOff(_ v: Bool) -> String { L10n.tr(v ? "On" : "Off", v ? "开" : "关") }
+        parts.append("\(L10n.tr("Cursor", "光标")) \(onOff(controller.showsCursor))")
+        parts.append("\(L10n.tr("Clicks", "点击")) \(onOff(controller.chipsHighlightClicks))")
+        parts.append("\(L10n.tr("System", "系统声")) \(onOff(controller.captureSystemAudio))")
+        if controller.captureMicrophone {
+            parts.append("\(L10n.tr("Mic", "麦克风")) \(onOff(true))")
+        }
+        return parts.joined(separator: "  ")
+    }
+
+    private static func formatSize(_ bytes: Int64) -> String {
+        if bytes >= 1_048_576 { return String(format: "%.0f MB", Double(bytes) / 1_048_576) }
+        if bytes >= 1024 { return String(format: "%.0f KB", Double(bytes) / 1024) }
+        return "\(bytes) B"
+    }
+
+    private func confirmDiscard() {
+        let alert = NSAlert()
+        alert.messageText = L10n.tr("Discard this recording?", "要放弃这段录制吗？")
+        alert.informativeText = L10n.tr("The captured video will be deleted.", "已录制的内容将被删除。")
+        alert.addButton(withTitle: L10n.tr("Discard", "放弃录制"))
+        alert.addButton(withTitle: L10n.tr("Keep Recording", "继续录制"))
+        if alert.runModal() == .alertFirstButtonReturn {
+            controller.cancelRecording()
+        }
+    }
+
+    // MARK: Bottom bar
+
+    private var bottomBar: some View {
+        HStack(spacing: 8) {
             Button {
-                if let url = controller.lastOutputURL {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    saveToVisible.toggle()
+                    windowPickerVisible = false
                 }
             } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "folder").font(.system(size: 14, weight: .medium))
-                    Text("Reveal Last").font(.system(size: 14, weight: .medium))
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11.5, weight: .medium))
+                    if saveToVisible {
+                        Text(controller.outputDirectory.lastPathComponent)
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(L10n.tr("Save to", "保存位置"))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(theme.textSecondary)
+                    } else {
+                        Text(L10n.tr("Save to", "保存位置"))
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    Image(systemName: saveToVisible ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(theme.textTertiary)
                 }
-                .foregroundColor(controller.lastOutputURL == nil ? theme.textTertiary : Color.accentColor)
+                .foregroundColor(theme.textPrimary)
+                .padding(.horizontal, 11)
+                .frame(height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(theme.btnBg)
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.btnBorder, lineWidth: 0.5))
+                )
             }
             .buttonStyle(.plain)
-            .disabled(controller.lastOutputURL == nil)
 
             Spacer()
 
-            Button { NSApp.terminate(nil) } label: {
-                Text("Quit").font(.system(size: 14, weight: .medium)).foregroundColor(.accentColor)
+            barIcon("folder", tip: L10n.tr("Reveal in Finder", "在访达中打开")) {
+                NSWorkspace.shared.open(controller.outputDirectory)
             }
-            .buttonStyle(.plain)
+            barIcon("gearshape", tip: L10n.tr("Settings", "设置")) {
+                SettingsWindowController.shared.show()
+            }
+            barIcon("power", tip: L10n.tr("Quit", "退出")) {
+                NSApp.terminate(nil)
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 14)
-        .padding(.bottom, 2)
+        .padding(.top, 12)
+    }
+
+    private func barIcon(_ symbol: String, tip: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(theme.textSecondary)
+                .frame(width: 30, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(theme.btnBg)
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.btnBorder, lineWidth: 0.5))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(tip)
     }
 
     // MARK: Shared building blocks
@@ -393,17 +664,11 @@ struct ControlPanelView: View {
         Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, inset)
     }
 
-    private var chevron: some View {
-        Image(systemName: "chevron.right")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(theme.chevron)
-    }
-
     private func backButton(_ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
-                Text("Back").font(.system(size: 13))
+                Text(L10n.tr("Back", "返回")).font(.system(size: 13))
             }
             .foregroundColor(.accentColor)
         }
@@ -418,22 +683,94 @@ struct ControlPanelView: View {
 
 // MARK: - Reusable views
 
-/// A colored rounded-square badge with a white SF Symbol, matching the design's
-/// 28×28 icon tiles.
-private struct IconBadge: View {
-    let color: Color
+/// A white action card: monochrome icon + title. The bound hotkey (or
+/// "not set") only appears as a bottom overlay while hovering.
+private struct ActionCard: View {
+    let theme: PanelTheme
     let symbol: String
+    let title: String
+    let shortcut: String?
+    let action: () -> Void
+    @State private var hover = false
+
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(.white)
-            .frame(width: 28, height: 28)
-            .background(RoundedRectangle(cornerRadius: 7).fill(color))
-            .shadow(color: color.opacity(0.4), radius: 1.5, x: 0, y: 1)
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Image(systemName: symbol)
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundColor(theme.textPrimary)
+                    .frame(height: 22)
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundColor(theme.textPrimary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(theme.cardBgStrong)
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(theme.cardBorder, lineWidth: 0.5))
+            )
+            .overlay(RoundedRectangle(cornerRadius: 10).fill(hover ? theme.rowHover : Color.clear))
+            .overlay(alignment: .bottom) {
+                if hover {
+                    Text(shortcut ?? L10n.tr("Not set", "未设置"))
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundColor(shortcut == nil ? theme.textTertiary.opacity(0.75) : theme.textSecondary)
+                        .lineLimit(1)
+                        .padding(.bottom, 3)
+                        .transition(.opacity)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .animation(.easeInOut(duration: 0.12), value: hover)
     }
 }
 
-/// A tappable row with a hover highlight, used for capture/window/shortcut rows.
+/// An option toggle card: on = green-tinted fill + green border/text per
+/// design, off = neutral gray fill with a constant light border.
+private struct ToggleCard: View {
+    let theme: PanelTheme
+    let symbol: String
+    let label: String
+    @Binding var isOn: Bool
+    var onChange: ((Bool) -> Void)? = nil
+    @State private var hover = false
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+            onChange?(isOn)
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 15, weight: .medium))
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(isOn ? theme.toggleOnFg : theme.textTertiary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 54)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isOn ? theme.toggleOnBg : theme.toggleOffBg)
+                    .overlay(RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(isOn ? theme.toggleOnBorder : theme.toggleOffBorder,
+                                      lineWidth: 1))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .animation(.easeInOut(duration: 0.15), value: isOn)
+    }
+}
+
+/// A tappable row with a hover highlight.
 private struct HoverRow<Content: View>: View {
     let theme: PanelTheme
     let height: CGFloat
@@ -454,123 +791,35 @@ private struct HoverRow<Content: View>: View {
     }
 }
 
-/// The sliding 30/60 FPS segmented control from the design.
+/// The sliding 30/60 FPS segmented control, compact edition.
 private struct FpsSegmented: View {
     let theme: PanelTheme
     @Binding var fps: Int
 
     var body: some View {
         ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 8).fill(theme.track)
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 7).fill(theme.track)
+            RoundedRectangle(cornerRadius: 5)
                 .fill(theme.pill)
-                .frame(width: 63, height: 24)
-                .shadow(color: .black.opacity(0.14), radius: 1.5, x: 0, y: 1)
-                .offset(x: fps == 60 ? 69 : 2)
-                .animation(.easeInOut(duration: 0.22), value: fps)
+                .frame(width: 48, height: 20)
+                .shadow(color: .black.opacity(0.14), radius: 1, x: 0, y: 1)
+                .offset(x: fps == 60 ? 54 : 2)
+                .animation(.easeInOut(duration: 0.2), value: fps)
             HStack(spacing: 0) {
                 segment(30)
                 segment(60)
             }
         }
-        .frame(width: 134, height: 28)
+        .frame(width: 104, height: 24)
     }
 
     private func segment(_ value: Int) -> some View {
         Text("\(value)")
-            .font(.system(size: 13.5, weight: .medium))
+            .font(.system(size: 12, weight: .medium))
             .foregroundColor(fps == value ? theme.textPrimary : theme.textSecondary)
-            .frame(width: 65, height: 28)
+            .frame(width: 52, height: 24)
             .contentShape(Rectangle())
             .onTapGesture { fps = value }
-    }
-}
-
-// MARK: - Shortcuts editor (sub-screen)
-
-private struct ShortcutsScreen: View {
-    let theme: PanelTheme
-    let onBack: () -> Void
-    @ObservedObject private var manager = ShortcutManager.shared
-    @StateObject private var recorder = ShortcutRecorder()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Button(action: { recorder.cancel(); onBack() }) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
-                        Text("Back").font(.system(size: 13))
-                    }.foregroundColor(.accentColor)
-                }
-                .buttonStyle(.plain)
-                Spacer()
-                Text("Global Shortcuts").font(.system(size: 13, weight: .semibold)).foregroundColor(theme.textSecondary)
-                Spacer()
-                Color.clear.frame(width: 44, height: 1)
-            }
-
-            VStack(spacing: 0) {
-                ForEach(Array(ShortcutAction.allCases.enumerated()), id: \.element) { idx, action in
-                    if idx > 0 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 14) }
-                    row(for: action)
-                }
-            }
-            .background(RoundedRectangle(cornerRadius: 11).fill(theme.cardBg))
-            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(theme.cardBorder, lineWidth: 0.5))
-            .clipShape(RoundedRectangle(cornerRadius: 11))
-
-            Text(recorder.capturingAction != nil
-                 ? "Type a combination with ⌘, ⌥ or ⌃ · Esc to cancel"
-                 : "Shortcuts work system-wide while iRecord is running.")
-                .font(.system(size: 11.5))
-                .foregroundColor(theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 4)
-        }
-        .onDisappear { recorder.cancel() }
-    }
-
-    @ViewBuilder
-    private func row(for action: ShortcutAction) -> some View {
-        let isCapturing = recorder.capturingAction == action
-        let combo = manager.combo(for: action)
-
-        HStack(spacing: 10) {
-            Image(systemName: action.symbol).frame(width: 20).foregroundColor(theme.textSecondary)
-            Text(action.title).font(.system(size: 14)).foregroundColor(theme.textPrimary)
-            Spacer()
-
-            if isCapturing {
-                Text("Type shortcut…")
-                    .font(.system(size: 11.5)).foregroundColor(.accentColor)
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.accentColor, lineWidth: 0.5))
-            } else if let combo, !combo.isEmpty {
-                Text(combo.displayString)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundColor(theme.textSecondary)
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(theme.badgeBg))
-            } else {
-                Text("Not set").font(.system(size: 11.5)).foregroundColor(theme.textTertiary)
-            }
-
-            Button(action: { isCapturing ? recorder.cancel() : recorder.begin(action) }) {
-                Image(systemName: isCapturing ? "xmark.circle.fill" : "pencil").foregroundColor(theme.textSecondary)
-            }
-            .buttonStyle(.plain)
-            .help(isCapturing ? "Cancel" : "Record shortcut")
-
-            Button(action: { manager.setCombo(nil, for: action) }) {
-                Image(systemName: "trash").foregroundColor(theme.textSecondary)
-            }
-            .buttonStyle(.plain)
-            .disabled(combo == nil)
-            .help("Clear shortcut")
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 44)
     }
 }
 
@@ -582,6 +831,7 @@ struct PanelTheme {
     let textSecondary: Color
     let textTertiary: Color
     let cardBg: Color
+    let cardBgStrong: Color
     let cardBorder: Color
     let separator: Color
     let chevron: Color
@@ -591,6 +841,11 @@ struct PanelTheme {
     let btnBg: Color
     let btnBorder: Color
     let badgeBg: Color
+    let toggleOnBg: Color
+    let toggleOnFg: Color
+    let toggleOnBorder: Color
+    let toggleOffBg: Color
+    let toggleOffBorder: Color
 
     static func make(dark: Bool) -> PanelTheme {
         func c(_ r: Double, _ g: Double, _ b: Double, _ a: Double) -> Color {
@@ -602,30 +857,42 @@ struct PanelTheme {
                 textSecondary: c(235, 235, 245, 0.55),
                 textTertiary: c(235, 235, 245, 0.40),
                 cardBg: c(255, 255, 255, 0.06),
+                cardBgStrong: c(255, 255, 255, 0.09),
                 cardBorder: c(255, 255, 255, 0.08),
-                separator: c(255, 255, 255, 0.09),
+                separator: c(255, 255, 255, 0.16),
                 chevron: c(235, 235, 245, 0.30),
                 rowHover: c(255, 255, 255, 0.06),
                 track: c(120, 120, 128, 0.34),
                 pill: c(120, 120, 128, 0.62),
                 btnBg: c(255, 255, 255, 0.10),
                 btnBorder: c(255, 255, 255, 0.14),
-                badgeBg: c(255, 255, 255, 0.10))
+                badgeBg: c(255, 255, 255, 0.10),
+                toggleOnBg: c(51, 199, 89, 0.22),
+                toggleOnFg: c(120, 225, 155, 1.0),
+                toggleOnBorder: c(120, 225, 155, 0.55),
+                toggleOffBg: c(255, 255, 255, 0.07),
+                toggleOffBorder: c(255, 255, 255, 0.10))
         } else {
             return PanelTheme(
                 textPrimary: c(29, 29, 31, 1.0),
                 textSecondary: c(0, 0, 0, 0.50),
                 textTertiary: c(0, 0, 0, 0.36),
                 cardBg: c(255, 255, 255, 0.60),
+                cardBgStrong: c(255, 255, 255, 0.92),
                 cardBorder: c(0, 0, 0, 0.05),
-                separator: c(0, 0, 0, 0.08),
+                separator: c(0, 0, 0, 0.14),
                 chevron: c(0, 0, 0, 0.25),
                 rowHover: c(0, 0, 0, 0.045),
                 track: c(120, 120, 128, 0.14),
                 pill: c(255, 255, 255, 1.0),
                 btnBg: c(255, 255, 255, 0.90),
                 btnBorder: c(0, 0, 0, 0.13),
-                badgeBg: c(0, 0, 0, 0.06))
+                badgeBg: c(0, 0, 0, 0.06),
+                toggleOnBg: c(234, 249, 238, 1.0),
+                toggleOnFg: c(51, 199, 89, 1.0),
+                toggleOnBorder: c(51, 199, 89, 1.0),
+                toggleOffBg: c(245, 245, 247, 1.0),
+                toggleOffBorder: c(231, 231, 232, 1.0))
         }
     }
 }

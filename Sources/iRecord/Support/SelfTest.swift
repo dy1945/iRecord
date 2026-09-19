@@ -15,6 +15,163 @@ import ScreenCaptureKit
 /// queue, so this test must keep the main run loop spinning (never block it) and
 /// call `exit()` from within a callback once finished.
 enum SelfTest {
+
+    /// Headless verification of the scrolling-screenshot stitch engine.
+    /// Builds a synthetic tall "page", simulates scroll frames (variable step
+    /// sizes, including a fast jump and a no-move frame), stitches them, and
+    /// verifies the result reconstructs the page pixel-accurately.
+    /// `iRecord --stitchtest`
+    static func runStitch() -> Never {
+        let pageW = 320, pageH = 3000, frameH = 480
+        guard let page = syntheticPage(width: pageW, height: pageH) else {
+            print("[stitchtest] FAIL: could not build synthetic page"); exit(5)
+        }
+
+        func frame(atTop top: Int) -> CGImage? {
+            page.cropping(to: CGRect(x: 0, y: top, width: pageW, height: frameH))
+        }
+
+        // Scroll offsets (content moves up): mixed small/large steps.
+        var tops = [0]
+        var y = 0
+        let rng: [Int] = [37, 61, 22, 90, 130, 45, 12, 200, 77, 33, 150, 28, 55, 99, 5, 250]
+        var i = 0
+        while y < pageH - frameH - 1 {
+            y += rng[i % rng.count]; i += 1
+            tops.append(min(y, pageH - frameH))
+        }
+        tops.append(tops.last!)    // no-movement frame at the end
+
+        guard let first = frame(atTop: 0), let stitcher = ImageStitcher(firstFrame: first) else {
+            print("[stitchtest] FAIL: init"); exit(5)
+        }
+        var matched = 0
+        var prevTop = tops.first!
+        for (idx, top) in tops.dropFirst().enumerated() {
+            guard let f = frame(atTop: top) else { continue }
+            if let m = stitcher.append(f) {
+                if m.dy > 0 {
+                    matched += 1
+                    if m.dy != top - prevTop {
+                        print("[stitchtest] frame \(idx): dy=\(m.dy) actual=\(top - prevTop)  ⚠️")
+                    }
+                }
+                prevTop = top
+            } else {
+                print("[stitchtest] frame \(idx) (top=\(top)): no match (step too large)")
+            }
+        }
+
+        guard let result = stitcher.currentImage else {
+            print("[stitchtest] FAIL: no result"); exit(5)
+        }
+        let expectedH = frameH + (tops.last! - 0)
+        print("[stitchtest] frames=\(tops.count) stitchedH=\(result.height) expectedH=\(expectedH) appended=\(matched)")
+
+        // Verify content: compare rows of the stitched image against the page.
+        var mismatches = 0
+        if result.height == expectedH, let buf1 = grayRows(result), let buf2 = grayRows(page) {
+            for row in [0, expectedH/4, expectedH/2, expectedH*3/4, expectedH-1] {
+                if buf1[row] != buf2[row] { mismatches += 1 }
+            }
+        }
+        if result.height == expectedH && mismatches == 0 {
+            print("[stitchtest] PASS ✅  stitched image reconstructs the page exactly")
+            exit(0)
+        }
+        print("[stitchtest] FAIL ❌  heightOK=\(result.height == expectedH) rowMismatches=\(mismatches)")
+        exit(6)
+    }
+
+    /// Headless verification of the still-screenshot pipeline: freeze all
+    /// displays, crop the main display, save a PNG. Needs Screen Recording
+    /// permission. `iRecord --shottest`
+    static func runShot() -> Never {
+        guard PermissionsManager.hasScreenRecordingPermission() else {
+            print("[shottest] FAIL: Screen Recording permission not granted."); exit(2)
+        }
+        Task { @MainActor in
+            do {
+                let frozen = try await ScreenshotCapture.freezeDisplays()
+                guard let main = frozen.first else {
+                    print("[shottest] FAIL: no displays"); exit(5)
+                }
+                let rect = main.frame.insetBy(dx: 40, dy: 40)
+                guard let img = ScreenshotCapture.crop(globalRect: rect, from: frozen) else {
+                    print("[shottest] FAIL: crop returned nil"); exit(6)
+                }
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("irecord-shottest.png")
+                let rep = NSBitmapImageRep(cgImage: img)
+                guard let png = rep.representation(using: .png, properties: [:]),
+                      (try? png.write(to: url)) != nil else {
+                    print("[shottest] FAIL: could not write PNG"); exit(6)
+                }
+                let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int) ?? 0
+                print("[shottest] displays=\(frozen.count) crop=\(img.width)x\(img.height) png=\(size/1024)KB → \(url.path)")
+                // Multi-format encode sanity: every configured format must encode.
+                var formatReport: [String] = []
+                let nsimg = NSImage(cgImage: img, size: NSSize(width: img.width, height: img.height))
+                for fmt in ScreenshotFormat.allCases {
+                    if let data = ScreenshotFileIO.encode(image: nsimg, format: fmt) {
+                        formatReport.append("\(fmt.rawValue)=\(data.count/1024)KB")
+                    } else {
+                        print("[shottest] FAIL: encode returned nil for \(fmt.rawValue)"); exit(7)
+                    }
+                }
+                print("[shottest] formats: \(formatReport.joined(separator: " "))")
+                if img.width > 100 && size > 10_000 {
+                    print("[shottest] PASS ✅"); exit(0)
+                }
+                print("[shottest] FAIL ❌  (suspicious output)"); exit(6)
+            } catch {
+                print("[shottest] FAIL: \(error.localizedDescription)"); exit(4)
+            }
+        }
+        CFRunLoopRun()
+        exit(7)
+    }
+
+    /// Deterministic synthetic page: horizontal bands filled with
+    /// pseudo-random blocks — plenty of high-frequency detail for matching.
+    private static func syntheticPage(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        var seed: UInt64 = 12345
+        func rand() -> CGFloat {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return CGFloat((seed >> 33) & 0xFF) / 255.0
+        }
+        for y in stride(from: 0, to: height, by: 24) {
+            for x in stride(from: 0, to: width, by: 24) {
+                ctx.setFillColor(red: rand(), green: rand(), blue: rand(), alpha: 1)
+                ctx.fill(CGRect(x: x, y: y, width: 24, height: 24))
+            }
+        }
+        return ctx.makeImage()
+    }
+
+    /// Per-row average luminance of an image, for fast row comparison.
+    private static func grayRows(_ image: CGImage) -> [Int]? {
+        guard let data = image.dataProvider?.data, let base = CFDataGetBytePtr(data) else { return nil }
+        let bpl = image.bytesPerRow
+        let bpp = max(1, image.bitsPerPixel / 8)
+        var rows = [Int]()
+        rows.reserveCapacity(image.height)
+        for y in 0..<image.height {
+            var sum = 0
+            let row = base + y * bpl
+            for x in stride(from: 0, to: image.width, by: 8) {
+                let off = x * bpp
+                sum += Int(row[off]) + Int(row[off + 1]) + Int(row[off + 2])
+            }
+            rows.append(sum)
+        }
+        return rows
+    }
+
     final class Runner: NSObject, ScreenRecorderDelegate, @unchecked Sendable {
         let recorder = ScreenRecorder()
         var onFinish: ((URL) -> Void)?

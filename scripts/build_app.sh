@@ -38,6 +38,11 @@ cp "$EXEC" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
+# App icon (generate/refresh with ./scripts/render_icon.sh)
+if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
+    cp "$ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+fi
+
 # Ad-hoc code signing. A stable signature keeps the TCC permission grant from
 # being reset on every rebuild (important so the user only approves once).
 echo "==> Code signing (ad-hoc)…"

@@ -213,18 +213,18 @@ private final class SelectionView: NSView {
             item.state = on ? .on : .off
             menu.addItem(item)
         }
-        toggle("Show Cursor", c.showsCursor, #selector(toggleCursor))
-        toggle("Highlight Clicks", c.highlightClicks, #selector(toggleClicks))
-        toggle("System Audio", c.captureSystemAudio, #selector(toggleSystemAudio))
-        toggle("Microphone", c.captureMicrophone, #selector(toggleMic))
+        toggle(L10n.tr("Show Cursor", "显示光标"), c.showsCursor, #selector(toggleCursor))
+        toggle(L10n.tr("Highlight Clicks", "点击高亮"), c.highlightClicks, #selector(toggleClicks))
+        toggle(L10n.tr("System Audio", "系统声音"), c.captureSystemAudio, #selector(toggleSystemAudio))
+        toggle(L10n.tr("Microphone", "麦克风"), c.captureMicrophone, #selector(toggleMic))
         menu.addItem(.separator())
-        let fps30 = NSMenuItem(title: "Capture 30 FPS", action: #selector(setFPS30), keyEquivalent: "")
+        let fps30 = NSMenuItem(title: L10n.tr("Capture 30 FPS", "采集 30 FPS"), action: #selector(setFPS30), keyEquivalent: "")
         fps30.target = self; fps30.state = c.captureFPS == 30 ? .on : .off
-        let fps60 = NSMenuItem(title: "Capture 60 FPS", action: #selector(setFPS60), keyEquivalent: "")
+        let fps60 = NSMenuItem(title: L10n.tr("Capture 60 FPS", "采集 60 FPS"), action: #selector(setFPS60), keyEquivalent: "")
         fps60.target = self; fps60.state = c.captureFPS == 60 ? .on : .off
         menu.addItem(fps30); menu.addItem(fps60)
         menu.addItem(.separator())
-        let cancelItem = NSMenuItem(title: "Cancel", action: #selector(cancelFromMenu), keyEquivalent: "")
+        let cancelItem = NSMenuItem(title: L10n.tr("Cancel", "取消"), action: #selector(cancelFromMenu), keyEquivalent: "")
         cancelItem.target = self
         menu.addItem(cancelItem)
 
@@ -317,7 +317,8 @@ private final class SelectionView: NSView {
     }
 
     private func drawHint() {
-        let text = "Drag to select an area, or use the toolbar  ·  Esc to cancel"
+        let text = L10n.tr("Drag to select an area, or use the toolbar  ·  Esc to cancel",
+                           "拖拽框选区域，或使用工具栏  ·  Esc 取消")
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 14, weight: .medium),
             .foregroundColor: NSColor.white

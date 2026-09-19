@@ -19,15 +19,52 @@ final class RecordingController: ObservableObject {
     @Published var captureFPS: Int { didSet { defaults.set(captureFPS, forKey: "captureFPS") } }
     @Published var showsCursor: Bool { didSet { defaults.set(showsCursor, forKey: "cursor") } }
     @Published var highlightClicks: Bool { didSet { defaults.set(highlightClicks, forKey: "clicks") } }
+    /// Screenshot output: also write the image to the effective screenshot
+    /// directory (false, default, keeps it clipboard-only).
+    @Published var screenshotAlsoSaves: Bool { didSet { defaults.set(screenshotAlsoSaves, forKey: "shotAlsoSaves") } }
+    /// When true (default), screenshots save into the recording folder;
+    /// when false, they go to `screenshotDirectory`.
+    @Published var screenshotUsesRecordingDir: Bool { didSet { defaults.set(screenshotUsesRecordingDir, forKey: "shotSameAsRec") } }
+    /// Screenshot folder used when `screenshotUsesRecordingDir` is off
+    /// (defaults to ~/Pictures).
+    @Published var screenshotDirectory: URL { didSet { defaults.set(screenshotDirectory.path, forKey: "shotDir") } }
+    /// Copy every screenshot to the clipboard (default true).
+    @Published var shotCopyToClipboard: Bool { didSet { defaults.set(shotCopyToClipboard, forKey: "shotCopyClip") } }
+    /// Image format used when a screenshot is written to disk (default PNG).
+    @Published var screenshotImageFormat: ScreenshotFormat { didSet { defaults.set(screenshotImageFormat.rawValue, forKey: "shotFormat") } }
+    /// Pre-select the frontmost window when the shot overlay opens (default true).
+    @Published var autoSelectFrontWindow: Bool { didSet { defaults.set(autoSelectFrontWindow, forKey: "shotAutoFront") } }
+    /// Frame the window under the cursor while hovering in the shot overlay
+    /// (default true).
+    @Published var hoverFramesWindows: Bool { didSet { defaults.set(hoverFramesWindows, forKey: "shotHoverFrame") } }
+
+    /// Flipped whenever the UI language changes so observed views re-render.
+    @Published var uiRefresh = false
 
     /// Folder finished recordings are saved to (defaults to ~/Movies).
     @Published var outputDirectory: URL { didSet { defaults.set(outputDirectory.path, forKey: "outputDir") } }
+
+    /// Where screenshot files actually land.
+    var effectiveScreenshotDirectory: URL {
+        screenshotUsesRecordingDir ? outputDirectory : screenshotDirectory
+    }
 
     // Published live state.
     @Published private(set) var state: RecorderState = .idle
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var lastOutputURL: URL?
     @Published var lastErrorMessage: String?
+    /// Live size of the file being written, polled while recording.
+    @Published private(set) var recordingFileSize: Int64 = 0
+    /// What the current session captures (for the status chips).
+    @Published private(set) var sessionInfo: RecordingSessionInfo?
+
+    /// Summary of the active capture target, shown as status chips.
+    struct RecordingSessionInfo {
+        enum Mode { case area, window, display }
+        let mode: Mode
+        let size: CGSize?
+    }
 
     private let recorder = ScreenRecorder()
     private let defaults = UserDefaults.standard
@@ -36,9 +73,21 @@ final class RecordingController: ObservableObject {
     private var accumulatedBeforePause: TimeInterval = 0
     private var sessionHighlightClicks = false
 
+    /// Chips reflect the session's actual options (window capture drops clicks).
+    var chipsHighlightClicks: Bool { sessionHighlightClicks }
+    /// Temp file currently being written; polled for the live size readout.
+    private var activeTempURL: URL?
+    /// Set by `cancelRecording`: the finished file is deleted, not presented.
+    private var discardOnFinish = false
+
     static var defaultOutputDirectory: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies")
+    }
+
+    static var defaultScreenshotDirectory: URL {
+        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            ?? defaultOutputDirectory
     }
 
     /// Callback fired when a recording finishes (used to open the file / show toast).
@@ -53,6 +102,17 @@ final class RecordingController: ObservableObject {
         captureFPS = defaults.object(forKey: "captureFPS") as? Int ?? 60
         showsCursor = defaults.object(forKey: "cursor") as? Bool ?? true
         highlightClicks = defaults.bool(forKey: "clicks")
+        screenshotAlsoSaves = defaults.bool(forKey: "shotAlsoSaves")
+        screenshotUsesRecordingDir = defaults.object(forKey: "shotSameAsRec") as? Bool ?? true
+        if let path = defaults.string(forKey: "shotDir") {
+            screenshotDirectory = URL(fileURLWithPath: path, isDirectory: true)
+        } else {
+            screenshotDirectory = RecordingController.defaultScreenshotDirectory
+        }
+        shotCopyToClipboard = defaults.object(forKey: "shotCopyClip") as? Bool ?? true
+        screenshotImageFormat = ScreenshotFormat(rawValue: defaults.string(forKey: "shotFormat") ?? "") ?? .png
+        autoSelectFrontWindow = defaults.object(forKey: "shotAutoFront") as? Bool ?? true
+        hoverFramesWindows = defaults.object(forKey: "shotHoverFrame") as? Bool ?? true
         if let path = defaults.string(forKey: "outputDir") {
             outputDirectory = URL(fileURLWithPath: path, isDirectory: true)
         } else {
@@ -97,8 +157,40 @@ final class RecordingController: ObservableObject {
             if case .window = target { sessionHighlightClicks = false }
         }
 
+        sessionInfo = Self.makeSessionInfo(for: target)
+        recordingFileSize = 0
+        discardOnFinish = false
+
         let url = Self.makeTempOutputURL(format: .mov)
+        activeTempURL = url
         recorder.start(configuration: config, outputURL: url)
+    }
+
+    private static func makeSessionInfo(for target: CaptureTarget) -> RecordingSessionInfo {
+        switch target {
+        case .area(_, let rect):
+            return RecordingSessionInfo(mode: .area, size: rect.size)
+        case .window(let id):
+            return RecordingSessionInfo(mode: .window, size: windowSize(id))
+        case .display(let id):
+            return RecordingSessionInfo(mode: .display,
+                                        size: ScreenInfo.nsScreen(for: id)?.frame.size)
+        }
+    }
+
+    private static func windowSize(_ id: CGWindowID) -> CGSize? {
+        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
+              let b = list.first?[kCGWindowBounds as String] as? [String: Any],
+              let r = CGRect(dictionaryRepresentation: b as CFDictionary) else { return nil }
+        return r.size
+    }
+
+    /// Stops the recording and throws the captured file away instead of
+    /// presenting it in the editor.
+    func cancelRecording() {
+        guard isRecording else { return }
+        discardOnFinish = true
+        recorder.stop()
     }
 
     /// Records the final saved/exported URL after the editor finishes.
@@ -127,6 +219,10 @@ final class RecordingController: ObservableObject {
                 if case .recording = self.state {
                     self.elapsed = self.accumulatedBeforePause + Date().timeIntervalSince(start)
                 }
+                if let url = self.activeTempURL,
+                   let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 {
+                    self.recordingFileSize = size
+                }
             }
         }
     }
@@ -148,31 +244,12 @@ final class RecordingController: ObservableObject {
         return dir.appendingPathComponent("iRecord-\(stamp).\(ext)")
     }
 
-    /// Moves a finished file into the configured output directory with a friendly
-    /// name. Falls back to ~/Movies (then the temp location) if the chosen folder
-    /// is not writable.
-    func moveToOutputDirectory(_ url: URL) -> URL {
-        let fm = FileManager.default
-        var destDir = outputDirectory
-        if !fm.fileExists(atPath: destDir.path) {
-            try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
-        }
-        if !fm.isWritableFile(atPath: destDir.path) {
-            destDir = RecordingController.defaultOutputDirectory
-            try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
-        }
-
+    /// Base name for a finished recording, per the settings mockup:
+    /// `录屏 2026-09-19 09-01-30` (seconds included to avoid collisions).
+    static func recordingBaseName(date: Date = Date()) -> String {
         let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        let name = "iRecord Recording \(df.string(from: Date())).\(url.pathExtension)"
-        let dest = destDir.appendingPathComponent(name)
-        do {
-            try? fm.removeItem(at: dest)
-            try fm.moveItem(at: url, to: dest)
-            return dest
-        } catch {
-            return url
-        }
+        df.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        return "\(L10n.tr("Recording", "录屏")) \(df.string(from: date))"
     }
 }
 
@@ -202,6 +279,8 @@ extension RecordingController: ScreenRecorderDelegate {
                 self.accumulatedBeforePause = self.elapsed
             case .idle, .failed:
                 self.stopTimer()
+                self.sessionInfo = nil
+                self.activeTempURL = nil
                 ClickHighlighter.shared.stop()
             case .finishing:
                 ClickHighlighter.shared.stop()
@@ -213,8 +292,16 @@ extension RecordingController: ScreenRecorderDelegate {
 
     nonisolated func recorder(_ recorder: ScreenRecorder, didFinishRecordingTo url: URL) {
         Task { @MainActor in
-            // Hand the raw intermediate to the editor; saving happens after export.
             self.stopTimer()
+            if self.discardOnFinish {
+                // Cancelled: delete the partial recording, no editor.
+                self.discardOnFinish = false
+                self.activeTempURL = nil
+                self.recordingFileSize = 0
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            // Hand the raw intermediate to the editor; saving happens after export.
             self.onFinished?(url)
         }
     }
@@ -222,6 +309,7 @@ extension RecordingController: ScreenRecorderDelegate {
     nonisolated func recorder(_ recorder: ScreenRecorder, didFailWith error: Error) {
         Task { @MainActor in
             self.lastErrorMessage = error.localizedDescription
+            self.discardOnFinish = false
             self.stopTimer()
         }
     }

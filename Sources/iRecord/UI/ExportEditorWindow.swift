@@ -99,7 +99,7 @@ final class ExportEditorWindowController: NSWindowController {
         content.addSubview(bar)
 
         // Left group: mute + trim + size + scale + fps
-        let trimButton = NSButton(title: " Trim", target: self, action: #selector(beginTrim))
+        let trimButton = NSButton(title: L10n.tr(" Trim", " 剪辑"), target: self, action: #selector(beginTrim))
         trimButton.bezelStyle = .rounded
         trimButton.image = NSImage(systemSymbolName: "scissors", accessibilityDescription: "Trim")
         trimButton.imagePosition = .imageLeading
@@ -122,15 +122,19 @@ final class ExportEditorWindowController: NSWindowController {
         scalePopup.action = #selector(scaleChanged)
 
         formatPopup.addItems(withTitles: formats.map { $0.title })
+        // Preselect the container the user picked in Settings → 保存.
+        if let idx = formats.firstIndex(where: { $0.format == RecordingController.shared.outputFormat }) {
+            formatPopup.selectItem(at: idx)
+        }
         formatPopup.target = self
         formatPopup.action = #selector(formatChanged)
 
-        destinationPopup.addItems(withTitles: ["Save to File…", "Copy to Clipboard"])
+        destinationPopup.addItems(withTitles: [L10n.tr("Save to File…", "存储到文件…"), L10n.tr("Copy to Clipboard", "复制到剪贴板")])
 
         let leftStack = NSStackView(views: [
             muteButton,
             trimButton,
-            NSTextField(labelWithString: "Size"),
+            NSTextField(labelWithString: L10n.tr("Size", "尺寸")),
             widthField,
             NSTextField(labelWithString: "×"),
             heightField,
@@ -143,7 +147,7 @@ final class ExportEditorWindowController: NSWindowController {
         leftStack.alignment = .centerY
         leftStack.translatesAutoresizingMaskIntoConstraints = false
 
-        convertButton.title = "Convert"
+        convertButton.title = L10n.tr("Convert", "转换")
         convertButton.bezelStyle = .rounded
         convertButton.keyEquivalent = "\r"
         convertButton.target = self
@@ -251,7 +255,7 @@ final class ExportEditorWindowController: NSWindowController {
         let symbol = muted ? "speaker.slash.fill" : "speaker.wave.2.fill"
         muteButton.image = NSImage(systemSymbolName: symbol,
                                    accessibilityDescription: muted ? "Unmute" : "Mute")
-        muteButton.toolTip = muted ? "Sound off — click to enable" : "Sound on — click to mute"
+        muteButton.toolTip = muted ? L10n.tr("Sound off — click to enable", "已静音——点击开启声音") : L10n.tr("Sound on — click to mute", "声音开启——点击静音")
     }
 
     @objc private func beginTrim() {
@@ -279,7 +283,7 @@ final class ExportEditorWindowController: NSWindowController {
         }
         let seconds = CMTimeGetSeconds(CMTimeSubtract(e, s))
         guard seconds.isFinite, seconds > 0 else { statusLabel.stringValue = ""; return }
-        statusLabel.stringValue = String(format: "Length %.1fs", seconds)
+        statusLabel.stringValue = String(format: L10n.tr("Length %.1fs", "时长 %.1f 秒"), seconds)
     }
 
     @objc private func convert() {
@@ -301,7 +305,7 @@ final class ExportEditorWindowController: NSWindowController {
             format: entry.format,
             codec: entry.codec)
 
-        setBusy(true, message: "Converting…")
+        setBusy(true, message: L10n.tr("Converting…", "转换中…"))
         // GIF has no fractional progress; spin without a percentage there.
         circularProgress.setIndeterminate(entry.format == .gif)
         player.pause()
@@ -348,8 +352,7 @@ final class ExportEditorWindowController: NSWindowController {
     private func saveToFile(_ temp: URL, ext: String) {
         let panel = NSSavePanel()
         panel.directoryURL = defaultDirectory
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        panel.nameFieldStringValue = "iRecord Recording \(df.string(from: Date())).\(ext)"
+        panel.nameFieldStringValue = "\(RecordingController.recordingBaseName()).\(ext)"
         panel.canCreateDirectories = true
         panel.begin { [weak self] response in
             guard let self else { return }
@@ -385,7 +388,7 @@ final class ExportEditorWindowController: NSWindowController {
             pb.setData(data, forType: type)
         }
         didExportOrSave = true
-        statusLabel.stringValue = "Copied to clipboard"
+        statusLabel.stringValue = L10n.tr("Copied to clipboard", "已复制到剪贴板")
         onExported?(finalURL)
         // Brief confirmation, then close.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in

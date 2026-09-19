@@ -45,7 +45,7 @@ struct KeyCombo: Codable, Equatable {
     }
 
     private static let specialKeyNames: [UInt32: String] = [
-        UInt32(kVK_Return): "↩", UInt32(kVK_Tab): "⇥", UInt32(kVK_Space): "Space",
+        UInt32(kVK_Return): "↩", UInt32(kVK_Tab): "⇥", UInt32(kVK_Space): L10n.tr("Space", "空格"),
         UInt32(kVK_Delete): "⌫", UInt32(kVK_ForwardDelete): "⌦", UInt32(kVK_Escape): "⎋",
         UInt32(kVK_LeftArrow): "←", UInt32(kVK_RightArrow): "→",
         UInt32(kVK_UpArrow): "↑", UInt32(kVK_DownArrow): "↓",
@@ -79,12 +79,24 @@ enum ShortcutAction: String, CaseIterable, Codable {
     case toggleAreaRecording
     case recordFullScreen
     case pauseResume
+    case screenshotArea
+    case screenshotScrolling
+    case screenshotFullScreen
+    case pinFromClipboard
+    case togglePins
+    case recordWindow
 
     var title: String {
         switch self {
-        case .toggleAreaRecording: return "Start / Stop (Area)"
-        case .recordFullScreen:    return "Record Full Screen"
-        case .pauseResume:         return "Pause / Resume"
+        case .toggleAreaRecording: return L10n.tr("Start / Stop (Area)", "开始/停止（区域）")
+        case .recordFullScreen:    return L10n.tr("Record Full Screen", "录制全屏")
+        case .pauseResume:         return L10n.tr("Pause / Resume", "暂停/继续")
+        case .screenshotArea:      return L10n.tr("Screenshot (Area)", "区域截图")
+        case .screenshotScrolling: return L10n.tr("Scrolling Screenshot", "滚动截图")
+        case .screenshotFullScreen: return L10n.tr("Screenshot (Full Screen)", "全屏截图")
+        case .pinFromClipboard:    return L10n.tr("Pin Clipboard Image", "贴图（剪贴板）")
+        case .togglePins:          return L10n.tr("Hide / Show Pins", "隐藏/显示贴图")
+        case .recordWindow:        return L10n.tr("Record Window", "窗口录制")
         }
     }
 
@@ -93,19 +105,32 @@ enum ShortcutAction: String, CaseIterable, Codable {
         case .toggleAreaRecording: return "crop"
         case .recordFullScreen:    return "display"
         case .pauseResume:         return "playpause"
+        case .screenshotArea:      return "camera.viewfinder"
+        case .screenshotScrolling: return "rectangle.expand.vertical"
+        case .screenshotFullScreen: return "camera"
+        case .pinFromClipboard:    return "pin"
+        case .togglePins:          return "eye"
+        case .recordWindow:        return "macwindow"
         }
     }
 
     /// Stable, non-zero id used as the Carbon `EventHotKeyID`.
     var hotKeyID: UInt32 { UInt32((Self.allCases.firstIndex(of: self) ?? 0) + 1) }
 
-    /// Seeded on first launch only. ⌃⌘ combos are uncommon as global hotkeys.
+    /// Seeded on first launch only. ⌃⌘ combos are uncommon as global hotkeys;
+    /// the area screenshot uses ⌘E instead.
     var defaultCombo: KeyCombo? {
         let ctrlCmd = UInt32(controlKey) | UInt32(cmdKey)
         switch self {
         case .toggleAreaRecording: return KeyCombo(keyCode: UInt32(kVK_ANSI_R), carbonModifiers: ctrlCmd)
         case .recordFullScreen:    return nil
         case .pauseResume:         return KeyCombo(keyCode: UInt32(kVK_ANSI_P), carbonModifiers: ctrlCmd)
+        case .screenshotArea:      return KeyCombo(keyCode: UInt32(kVK_ANSI_E), carbonModifiers: UInt32(cmdKey))
+        case .screenshotScrolling: return KeyCombo(keyCode: UInt32(kVK_ANSI_S), carbonModifiers: ctrlCmd)
+        case .screenshotFullScreen: return nil
+        case .pinFromClipboard:    return KeyCombo(keyCode: UInt32(kVK_ANSI_V), carbonModifiers: ctrlCmd)
+        case .togglePins:          return KeyCombo(keyCode: UInt32(kVK_ANSI_H), carbonModifiers: ctrlCmd)
+        case .recordWindow:        return nil
         }
     }
 }
@@ -126,6 +151,8 @@ final class ShortcutManager: ObservableObject {
     private var handlerRef: EventHandlerRef?
     private let signature: OSType = 0x69526563 // 'iRec'
     private let defaultsKey = "shortcuts.v1"
+    private let seededV2Key = "shortcuts.seeded.v2"
+    private let migratedV3Key = "shortcuts.migrated.v3"
     private let defaults = UserDefaults.standard
 
     private init() {
@@ -177,7 +204,14 @@ final class ShortcutManager: ObservableObject {
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(combo.keyCode, combo.carbonModifiers, id,
                                          GetApplicationEventTarget(), 0, &ref)
-        if status == noErr, let ref { hotKeyRefs[action] = ref }
+        if status == noErr, let ref {
+            hotKeyRefs[action] = ref
+            NSLog("[shortcuts] registered %@ = %@", action.rawValue, combo.displayString)
+        } else {
+            // eventHotKeyExistsErr (-9878): another app already owns this combo.
+            NSLog("[shortcuts] FAILED to register %@ = %@ (status %d — likely taken by another app)",
+                  action.rawValue, combo.displayString, status)
+        }
     }
 
     private func unregister(_ action: ShortcutAction) {
@@ -192,6 +226,7 @@ final class ShortcutManager: ObservableObject {
     nonisolated private func handleHotKey(id: UInt32) {
         Task { @MainActor in
             guard let action = ShortcutAction.allCases.first(where: { $0.hotKeyID == id }) else { return }
+            NSLog("[shortcuts] fired %@", action.rawValue)
             self.onTrigger?(action)
         }
     }
@@ -204,13 +239,37 @@ final class ShortcutManager: ObservableObject {
             for (raw, combo) in decoded {
                 if let action = ShortcutAction(rawValue: raw) { combos[action] = combo }
             }
+            // Seed defaults for actions added after the user's first launch
+            // (without resurrecting combos the user deliberately cleared).
+            if !defaults.bool(forKey: seededV2Key) {
+                for action in ShortcutAction.allCases where combos[action] == nil {
+                    if let def = action.defaultCombo { combos[action] = def }
+                }
+                defaults.set(true, forKey: seededV2Key)
+                save()
+            }
         } else {
             // First launch: seed defaults.
             for action in ShortcutAction.allCases {
                 if let def = action.defaultCombo { combos[action] = def }
             }
+            defaults.set(true, forKey: seededV2Key)
             save()
         }
+        migrateAreaScreenshotDefault()
+    }
+
+    /// v3: the area-screenshot factory default changed ⌃⌘A → ⌘E. Move users who
+    /// still hold the old default; leave custom bindings untouched.
+    private func migrateAreaScreenshotDefault() {
+        guard !defaults.bool(forKey: migratedV3Key) else { return }
+        let oldDefault = KeyCombo(keyCode: UInt32(kVK_ANSI_A),
+                                  carbonModifiers: UInt32(controlKey) | UInt32(cmdKey))
+        if combos[.screenshotArea] == oldDefault, let newDefault = ShortcutAction.screenshotArea.defaultCombo {
+            combos[.screenshotArea] = newDefault
+            save()
+        }
+        defaults.set(true, forKey: migratedV3Key)
     }
 
     private func save() {

@@ -49,6 +49,42 @@ iRecord follows iRecord's two-phase model:
   with a live timer while recording.
 - **Menu-bar app**: runs as an accessory (no Dock icon).
 
+## Screenshots (iShot-style)
+
+A full screenshot suite modelled on iShot lives next to the recorder:
+
+- **Region screenshot** — freezes every display, then a crosshair with
+  full-screen guide lines, a **magnifier** (zoomed pixels + `#HEX` colour +
+  coordinates) and live `W × H` readout. After the drag, a floating toolbar
+  offers: **long screenshot · pin · edit · copy · save · cancel**.
+  Keys: **Enter** copy · **Space** save · **S** scrolling · **T** pin ·
+  **R / H** copy pixel RGB / HEX · **Esc / right-click** cancel · double-click
+  copies instantly.
+- **Scrolling screenshot (长截图)** — pick the scrollable region, then scroll
+  (wheel / trackpad / auto-scroll button). Frames are captured ~6×/s and
+  stitched pixel-accurately by template matching — works in *any* app, not
+  just browsers. A live preview grows beside the region; Enter finishes,
+  no-movement auto-stops, horizontal scroll aborts. The result opens in the
+  annotation editor.
+- **Annotation editor (截屏编辑)** — pen · line · arrow · rectangle · ellipse ·
+  **mosaic** (pixel-block) · text · local highlight; 5 preset colours + custom
+  well, 3 stroke widths, ⌘Z undo. Flattened output to Save… / Copy / Pin.
+- **Pin (贴图)** — floats the shot always-on-top: drag to move, scroll to
+  zoom, hover for close button + opacity slider, right-click menu (Annotate /
+  Copy / Save / Close), double-click or Esc closes. Because pins are ordinary
+  on-screen pixels, the next screenshot captures them — iShot's **二次截屏**.
+  Right-click ▸ Annotate reopens the editor and bakes the result back into
+  the pin (**二次标注**). A hotkey pins the clipboard image; another hides /
+  shows all pins.
+- **Hotkeys** (all remappable in the panel's Shortcuts screen): region
+  screenshot ⌘E · scrolling ⌃⌘S · pin clipboard ⌃⌘V · hide/show pins ⌃⌘H ·
+  full-screen-to-clipboard (unbound by default). If another screenshot app is
+  running it may already own a combo — iRecord logs failed registrations to
+  Console so you can rebind.
+
+Headless checks: `--stitchtest` (synthetic page → stitch engine must rebuild
+it pixel-exactly) and `--shottest` (freeze displays, crop, write a PNG).
+
 > Intentionally **excluded**: iRecord's plugin architecture (per the project goal).
 
 ## Requirements
@@ -84,6 +120,10 @@ no UI or clicking required:
 
 # Window enumeration:
 ./build/iRecord.app/Contents/MacOS/iRecord --listwindows
+
+# Screenshot pipelines:
+./build/iRecord.app/Contents/MacOS/iRecord --shottest    # freeze displays → crop → PNG
+./build/iRecord.app/Contents/MacOS/iRecord --stitchtest  # scrolling-stitch engine (synthetic page)
 ```
 
 Each prints the resulting file's dimensions/duration/size and exits `0` on PASS.
@@ -120,11 +160,21 @@ Sources/iRecord/
     ClickHighlighter.swift        Animated click ripples captured into the video
     ControlPanelView.swift        SwiftUI menu-bar popover (targets, window picker, capture settings)
     AppCoordinator.swift          Permission flow + area/window pickers + opens editor on finish
+  Screenshot/
+    ScreenshotCapture.swift       Still capture: freeze displays, region crop, live rect capture
+    ScreenshotOverlayController.swift Frozen-screen selection overlay (magnifier, guides, toolbar)
+    ScreenshotEditorWindow.swift  Annotation editor (pen/arrow/rect/mosaic/text/highlight, undo)
+    PinWindow.swift               Always-on-top pinned images (贴图, zoom/opacity/二次标注)
+    ScrollingCaptureController.swift Scrolling capture loop, HUD, live preview
+    ImageStitcher.swift           Template-match vertical stitcher for 长截图
   Support/
     ScreenInfo.swift              Display enumeration + coordinate conversion
     SelfTest.swift                Headless capture + export pipeline verification
 Resources/Info.plist             Bundle metadata, LSUIElement, usage strings
+Resources/AppIcon.icns           App icon (regenerate with scripts/render_icon.sh)
+Resources/Icon/                  Icon source: AppIcon.svg master, variants/, showcase.html
 scripts/build_app.sh             SPM build + .app assembly + ad-hoc codesign
+scripts/render_icon.sh           Render icon SVG → multi-resolution .icns (headless Chrome)
 ```
 
 ## Performance notes

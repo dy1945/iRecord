@@ -43,6 +43,28 @@ enum OutputFormat: String, CaseIterable, Identifiable {
     var fileExtension: String { rawValue }
 }
 
+/// Container format for saved screenshot images.
+enum ScreenshotFormat: String, CaseIterable, Identifiable {
+    case png
+    case jpg
+    case heic
+
+    var id: String { rawValue }
+
+    var displayName: String { rawValue.uppercased() }
+
+    var fileExtension: String { rawValue }
+
+    /// UTI passed to `CGImageDestinationCreateWithURL`.
+    var destinationUTI: String {
+        switch self {
+        case .png:  return "public.png"
+        case .jpg:  return "public.jpeg"
+        case .heic: return "public.heic"
+        }
+    }
+}
+
 /// What region of the screen the user wants to capture.
 enum CaptureTarget: Equatable {
     /// Capture an entire display.

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A2521"/>
+      <stop offset="1" stop-color="#15110E"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".10"/>
+      <stop offset=".45" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#plate)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  <!-- barrel ring -->
+  <circle cx="512" cy="512" r="270" fill="none" stroke="#FFFFFF" stroke-width="36"/>
+  <!-- six shutter blades -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="56" stroke-linecap="round">
+    <path d="M 752 512 Q 563.96 482 632 304.15"/>
+    <path d="M 752 512 Q 563.96 482 632 304.15" transform="rotate(60 512 512)"/>
+    <path d="M 752 512 Q 563.96 482 632 304.15" transform="rotate(120 512 512)"/>
+    <path d="M 752 512 Q 563.96 482 632 304.15" transform="rotate(180 512 512)"/>
+    <path d="M 752 512 Q 563.96 482 632 304.15" transform="rotate(240 512 512)"/>
+    <path d="M 752 512 Q 563.96 482 632 304.15" transform="rotate(300 512 512)"/>
+  </g>
+  <!-- record dot -->
+  <circle cx="512" cy="512" r="64" fill="#FF453A"/>
+</svg>

@@ -79,9 +79,24 @@ final class ScreenRecorder: NSObject, @unchecked Sendable {
     private var outputURL: URL?
     private var configuration: RecordingConfiguration?
 
-    // Pause bookkeeping: total time spent paused, subtracted from sample timestamps.
-    private var pausedDuration = CMTime.zero
-    private var pauseStartedAt: CMTime?
+    // MARK: CFR muxer state
+    //
+    // ScreenCaptureKit only emits frames when the screen changes, so writing
+    // frames as they arrive yields a variable-frame-rate file (static content
+    // reports as single-digit fps). Instead we keep the latest frame and a
+    // timer appends it at a strict cadence — repeating the previous frame
+    // when the screen is static — producing a constant-frame-rate file whose
+    // duration matches wall-clock time. Paused time is excluded by shifting
+    // the wall anchor.
+    private var latestVideoFrame: CMSampleBuffer?
+    private var pixelAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var cfrTimer: DispatchSourceTimer?
+    private var frameDuration = CMTime.invalid
+    private var framesWritten = 0
+    private var firstFramePTS: CMTime?
+    private var wallAnchor: CFAbsoluteTime?
+    private var totalPaused: CFAbsoluteTime = 0
+    private var pauseBegan: CFAbsoluteTime?
     private var lastVideoPTS: CMTime?
 
     // MARK: - Public API
@@ -101,8 +116,12 @@ final class ScreenRecorder: NSObject, @unchecked Sendable {
         self.configuration = config
         self.outputURL = url
         self.state = .preparing
-        self.pausedDuration = .zero
-        self.pauseStartedAt = nil
+        self.latestVideoFrame = nil
+        self.framesWritten = 0
+        self.firstFramePTS = nil
+        self.wallAnchor = nil
+        self.totalPaused = 0
+        self.pauseBegan = nil
         self.lastVideoPTS = nil
         self.sessionStarted = false
         self.isPaused = false
@@ -120,12 +139,17 @@ final class ScreenRecorder: NSObject, @unchecked Sendable {
         stateLock.lock(); defer { stateLock.unlock() }
         guard case .recording = state else { return }
         isPaused = true
+        pauseBegan = CFAbsoluteTimeGetCurrent()
         state = .paused
     }
 
     func resume() {
         stateLock.lock(); defer { stateLock.unlock() }
         guard case .paused = state else { return }
+        if let began = pauseBegan {
+            totalPaused += CFAbsoluteTimeGetCurrent() - began
+            pauseBegan = nil
+        }
         isPaused = false
         state = .recording
     }
@@ -188,6 +212,7 @@ final class ScreenRecorder: NSObject, @unchecked Sendable {
         // BGRA, IOSurface-backed — the cheapest path into VideoToolbox.
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfig.colorSpaceName = CGColorSpace.sRGB
+        frameDuration = CMTime(value: 1, timescale: CMTimeScale(config.fps))
 
         // Crop for area capture.
         if case .area(_, let rect) = config.target {
@@ -263,6 +288,13 @@ final class ScreenRecorder: NSObject, @unchecked Sendable {
         }
         writer.add(vInput)
         self.videoInput = vInput
+        self.pixelAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: vInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: Int(pixelSize.width),
+                kCVPixelBufferHeightKey as String: Int(pixelSize.height)
+            ])
 
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -302,6 +334,17 @@ final class ScreenRecorder: NSObject, @unchecked Sendable {
             try? await stream.stopCapture()
         }
         self.stream = nil
+
+        // Stop the cadence timer and flush the frames still due up to now, so
+        // the file's duration matches the wall-clock recording length.
+        cfrTimer?.cancel()
+        cfrTimer = nil
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            sampleQueue.async { [weak self] in
+                self?.appendDueFrames()
+                cont.resume()
+            }
+        }
 
         videoInput?.markAsFinished()
         systemAudioInput?.markAsFinished()
@@ -358,6 +401,15 @@ final class ScreenRecorder: NSObject, @unchecked Sendable {
         videoInput = nil
         systemAudioInput = nil
         micAudioInput = nil
+        pixelAdaptor = nil
+        latestVideoFrame = nil
+        cfrTimer?.cancel()
+        cfrTimer = nil
+        framesWritten = 0
+        firstFramePTS = nil
+        wallAnchor = nil
+        totalPaused = 0
+        pauseBegan = nil
         configuration = nil
         sessionStarted = false
     }
@@ -416,7 +468,7 @@ extension ScreenRecorder: SCStreamOutput {
     }
 
     private func handleVideo(_ sampleBuffer: CMSampleBuffer, paused: Bool) {
-        // Only append complete frames.
+        // Only keep complete frames.
         guard let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let attachments = attachmentsArray.first,
               let statusRaw = attachments[.status] as? Int,
@@ -425,19 +477,63 @@ extension ScreenRecorder: SCStreamOutput {
             return
         }
 
-        guard let writer, let videoInput else { return }
+        guard let writer else { return }
 
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        // Always track the newest frame (even while paused, so resume starts
+        // fresh); the CFR timer decides what gets written and when.
+        latestVideoFrame = sampleBuffer
 
         if !sessionStarted {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: pts)
             sessionStarted = true
+            firstFramePTS = pts
+            wallAnchor = CFAbsoluteTimeGetCurrent()
+            startCFRTimer()
         }
+    }
 
-        if paused { return }
-        guard videoInput.isReadyForMoreMediaData else { return }
-        videoInput.append(sampleBuffer)
-        lastVideoPTS = pts
+    // MARK: CFR muxer
+
+    /// Starts the cadence timer on the sample queue: every tick appends the
+    /// latest frame (repeating it when the screen is static) until the
+    /// written-frame count catches up with elapsed wall-clock time.
+    private func startCFRTimer() {
+        let fps = max(1, Int32(configuration?.fps ?? 30))
+        let timer = DispatchSource.makeTimerSource(queue: sampleQueue)
+        timer.schedule(deadline: .now(),
+                       repeating: .milliseconds(Int(1000 / fps)),
+                       leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in self?.appendDueFrames() }
+        cfrTimer = timer
+        timer.resume()
+    }
+
+    /// Appends as many frames as wall-clock time says are due. The video PTS
+    /// is synthetic (firstPTS + n × frameDuration), so output is strict CFR
+    /// and stays locked to real time regardless of capture jitter or drops.
+    private func appendDueFrames() {
+        guard sessionStarted, let videoInput, let adaptor = pixelAdaptor,
+              let config = configuration, let wallAnchor, let firstFramePTS else { return }
+        stateLock.lock()
+        let paused = isPaused
+        stateLock.unlock()
+        guard !paused else { return }
+
+        let elapsed = CFAbsoluteTimeGetCurrent() - wallAnchor - totalPaused
+        let targetCount = Int(elapsed * Double(config.fps))
+        while framesWritten < targetCount {
+            guard videoInput.isReadyForMoreMediaData,
+                  let buffer = latestVideoFrame,
+                  let pixelBuffer = CMSampleBufferGetImageBuffer(buffer) else { return }
+            let pts = CMTimeAdd(firstFramePTS, CMTimeMultiply(frameDuration, multiplier: Int32(framesWritten)))
+            if adaptor.append(pixelBuffer, withPresentationTime: pts) {
+                framesWritten += 1
+                lastVideoPTS = pts
+            } else {
+                return
+            }
+        }
     }
 
     private func append(_ sampleBuffer: CMSampleBuffer, to input: AVAssetWriterInput?) {

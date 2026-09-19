@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6D4BF0"/>
+      <stop offset="1" stop-color="#3E2BA8"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".14"/>
+      <stop offset=".45" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#plate)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-linecap="round">
+    <!-- stem -->
+    <path d="M 385 330 L 385 710" stroke-width="54"/>
+    <!-- bowl = lens ring -->
+    <circle cx="505" cy="425" r="92" stroke-width="50"/>
+    <!-- leg kicks from the bowl's lower-left junction -->
+    <path d="M 470 505 L 650 700" stroke-width="54"/>
+  </g>
+  <!-- record dot inside the bowl -->
+  <circle cx="505" cy="425" r="44" fill="#FF453A"/>
+</svg>
