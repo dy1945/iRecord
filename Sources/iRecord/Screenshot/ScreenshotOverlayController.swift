@@ -1,5 +1,48 @@
 import AppKit
 
+/// Selection cursor: a familiar pointer plus a compact blue add badge. The
+/// arrow makes the hotspot and drag direction clearer than a bare crosshair.
+enum ShotSelectionCursor {
+    static let cursor: NSCursor = {
+        let size = NSSize(width: 30, height: 34)
+        let image = NSImage(size: size, flipped: false) { _ in
+            let arrow = NSBezierPath()
+            arrow.move(to: NSPoint(x: 3, y: 31))
+            arrow.line(to: NSPoint(x: 3, y: 8))
+            arrow.line(to: NSPoint(x: 9, y: 13))
+            arrow.line(to: NSPoint(x: 13, y: 4))
+            arrow.line(to: NSPoint(x: 17, y: 6))
+            arrow.line(to: NSPoint(x: 13, y: 15))
+            arrow.line(to: NSPoint(x: 21, y: 15))
+            arrow.close()
+            NSColor.black.withAlphaComponent(0.9).setStroke()
+            arrow.lineWidth = 3
+            arrow.lineJoinStyle = .round
+            arrow.stroke()
+            NSColor.white.setFill()
+            arrow.fill()
+
+            let badge = NSRect(x: 15, y: 16, width: 14, height: 14)
+            NSColor.black.withAlphaComponent(0.88).setFill()
+            NSBezierPath(ovalIn: badge.insetBy(dx: -1.5, dy: -1.5)).fill()
+            NSColor.systemBlue.setFill()
+            NSBezierPath(ovalIn: badge).fill()
+            NSColor.white.setStroke()
+            let plus = NSBezierPath()
+            plus.lineWidth = 2
+            plus.lineCapStyle = .round
+            plus.move(to: NSPoint(x: badge.midX - 3.5, y: badge.midY))
+            plus.line(to: NSPoint(x: badge.midX + 3.5, y: badge.midY))
+            plus.move(to: NSPoint(x: badge.midX, y: badge.midY - 3.5))
+            plus.line(to: NSPoint(x: badge.midX, y: badge.midY + 3.5))
+            plus.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 3))
+    }()
+}
+
 /// The entry-point flows for still screenshots.
 @MainActor
 final class ScreenshotController {
@@ -70,7 +113,7 @@ final class ScreenshotController {
 /// Shows the frozen-screen selection overlay used by both region and scrolling
 /// screenshots. The frontmost on-screen window is pre-selected (iShot-style);
 /// hovering highlights the window under the cursor, a click locks it, and a
-/// drag always starts a manual region. Crosshair + magnifier while hovering;
+/// drag always starts a manual region. Crosshair guides while hovering;
 /// once a selection is locked a floating toolbar offers the iShot action set.
 @MainActor
 final class ScreenshotOverlayController {
@@ -79,6 +122,7 @@ final class ScreenshotOverlayController {
     private var windows: [NSWindow] = []
     private var frozen: [ScreenshotCapture.FrozenDisplay] = []
     private var candidateWindows: [CGRect] = []
+    private var ocrTask: Task<Void, Never>?
 
     func begin(frozen: [ScreenshotCapture.FrozenDisplay], scrolling: Bool) {
         dismiss()
@@ -101,6 +145,8 @@ final class ScreenshotOverlayController {
     }
 
     func dismiss() {
+        ocrTask?.cancel()
+        ocrTask = nil
         windows.forEach { $0.orderOut(nil) }
         windows.removeAll()
     }
@@ -134,6 +180,10 @@ final class ScreenshotOverlayController {
     }
 
     fileprivate func finish(globalRect: CGRect, action: ShotAction) {
+        if action == .ocr {
+            recognizeText(globalRect: globalRect)
+            return
+        }
         dismiss()
         guard let cg = ScreenshotCapture.crop(globalRect: globalRect, from: frozen) else { return }
         let size = NSSize(width: globalRect.width, height: globalRect.height)
@@ -149,8 +199,36 @@ final class ScreenshotOverlayController {
             ScreenshotEditorController.shared.present(image: image)
         case .scrolling:
             ScrollingCaptureController.shared.start(globalRect: globalRect)
-        case .cancel:
+        case .ocr, .cancel:
             break
+        }
+    }
+
+    private func recognizeText(globalRect: CGRect) {
+        guard ocrTask == nil,
+              let image = ScreenshotCapture.crop(globalRect: globalRect, from: frozen) else { return }
+        OCRResultController.shared.showLoading { [weak self] in
+            self?.ocrTask?.cancel()
+            self?.ocrTask = nil
+            for case let window as ShotOverlayWindow in self?.windows ?? [] {
+                window.shotView.prepareForReselection()
+            }
+            self?.windows.first(where: { $0.screen?.frame.intersects(globalRect) == true })?.makeKeyAndOrderFront(nil)
+        }
+        ocrTask = Task { [weak self] in
+            do {
+                let text = try await ScreenshotOCR.recognize(image)
+                guard !Task.isCancelled, let self else { return }
+                self.ocrTask = nil
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.dismiss()
+                }
+                OCRResultController.shared.showResult(text)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.ocrTask = nil
+                OCRResultController.shared.showError(error)
+            }
         }
     }
 
@@ -172,7 +250,7 @@ final class ScreenshotOverlayController {
 }
 
 enum ShotAction {
-    case copy, save, edit, pin, scrolling, cancel
+    case copy, save, edit, pin, scrolling, ocr, cancel
 }
 
 // MARK: - Window
@@ -235,10 +313,9 @@ private final class ShotOverlayView: NSView {
     private var mouse: CGPoint = .zero
     private var toolbar: ShotToolbarView?
     /// In-place annotation (iShot 截屏编辑): the editor canvas covers the
-    /// frozen screen and the toolbar swaps to the annotation strip.
-    private var editMode = false
+    /// frozen screen as soon as the selection locks; the merged toolbar below
+    /// the selection offers tools, a colour picker and the finish actions.
     private var editorView: AnnotationEditorView?
-    private var editToolbar: EditToolbarView?
 
     init(frozen: ScreenshotCapture.FrozenDisplay, scrolling: Bool) {
         self.frozen = frozen
@@ -256,11 +333,11 @@ private final class ShotOverlayView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
-        NSCursor.crosshair.set()
+        ShotSelectionCursor.cursor.set()
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .crosshair)
+        addCursorRect(bounds, cursor: ShotSelectionCursor.cursor)
     }
 
     // MARK: Window auto-matching
@@ -295,7 +372,7 @@ private final class ShotOverlayView: NSView {
     /// Called on the *other* displays' views when this session's highlight
     /// moves here, so only one window highlight exists at a time.
     func clearAutoSelection() {
-        guard hoverActive, hasSelection, startPoint == nil else { return }
+        guard hoverActive, hasSelection, startPoint == nil, editorView == nil else { return }
         hasSelection = false
         locked = false
         currentRect = .zero
@@ -327,6 +404,7 @@ private final class ShotOverlayView: NSView {
             dragging = true
             hoverActive = false
             locked = false
+            discardEditor()          // a fresh region means fresh annotations
             toolbar?.isHidden = true
         }
         hasSelection = true
@@ -354,10 +432,12 @@ private final class ShotOverlayView: NSView {
                 locked = true
             } else if RecordingController.shared.hoverFramesWindows,
                       let hit = candidateFrames.first(where: { $0.contains(globalPoint(p)) }) {
+                discardEditor()
                 adoptAutoSelection(globalRect: hit, lock: true)
             } else {
                 hasSelection = false
                 locked = false
+                discardEditor()
                 onClaimAutoSelection?(self)
             }
         } else {
@@ -369,8 +449,9 @@ private final class ShotOverlayView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         mouse = clampedToBounds(convert(event.locationInWindow, from: nil))
-        // Hover window-framing can be turned off in Settings → 截图.
-        if hoverActive, startPoint == nil, RecordingController.shared.hoverFramesWindows {
+        // Hover window-framing can be turned off in Settings → 截图. Once the
+        // annotation editor is attached the region stays put (iShot-style).
+        if editorView == nil, hoverActive, startPoint == nil, RecordingController.shared.hoverFramesWindows {
             let g = globalPoint(mouse)
             if let hit = candidateFrames.first(where: { $0.contains(g) }) {
                 adoptAutoSelection(globalRect: hit, lock: false)
@@ -384,7 +465,8 @@ private final class ShotOverlayView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        if editMode { exitEditMode() } else { onAction?(.zero, .cancel) }
+        if editorView?.currentTool != nil { editorView?.currentTool = nil }
+        else { onAction?(.zero, .cancel) }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -425,6 +507,11 @@ private final class ShotOverlayView: NSView {
     }
 
     private func confirm(_ action: ShotAction) {
+        // Annotated shots export through the editor so drawings are baked in.
+        if action != .scrolling, action != .ocr, let editor = editorView, !editor.shapes.isEmpty {
+            onEditedAction?(editor.flattenedImage(), action)
+            return
+        }
         let rect = (hasSelection && currentRect.width >= 8 && currentRect.height >= 8)
             ? currentRect.integral : bounds
         let global = CGRect(x: screenGlobalFrame.origin.x + rect.origin.x,
@@ -436,14 +523,17 @@ private final class ShotOverlayView: NSView {
     // MARK: Toolbar
 
     private func layoutToolbar() {
-        guard locked, hasSelection, currentRect.width >= 8, currentRect.height >= 8 else {
+        // Never show the bar mid-drag: while the mouse is down shaping a new
+        // region the canvas belongs to the selection gesture alone.
+        guard locked, hasSelection, !dragging, startPoint == nil,
+              currentRect.width >= 8, currentRect.height >= 8 else {
             toolbar?.isHidden = true
             return
         }
+        if !scrollingMode { ensureEditor() }
         if toolbar == nil {
-            let tb = ShotToolbarView(scrollingMode: scrollingMode) { [weak self] action in
-                guard let self else { return }
-                if action == .edit { self.enterEditMode() } else { self.confirm(action) }
+            let tb = ShotToolbarView(editor: editorView, scrollingMode: scrollingMode) { [weak self] action in
+                self?.confirm(action)
             }
             addSubview(tb)
             toolbar = tb
@@ -457,24 +547,25 @@ private final class ShotOverlayView: NSView {
         toolbar!.isHidden = false
     }
 
-    // MARK: In-place annotation (edit mode)
+    // MARK: In-place annotation editor
 
-    private func enterEditMode() {
-        guard !editMode, hasSelection, currentRect.width >= 8, currentRect.height >= 8 else { return }
-        editMode = true
-
+    /// Attaches the annotation canvas (transparent, covering the frozen
+    /// screen) and points its export crop at the current selection.
+    private func ensureEditor() {
+        if let editor = editorView {
+            updateEditorCrop(for: editor)
+            return
+        }
         let image = backgroundImage ?? NSImage(cgImage: frozen.image, size: bounds.size)
         let editor = AnnotationEditorView(image: image)
         editor.drawsBaseImage = false
         editor.frame = bounds
-        // The editor view is flipped (top-left origin); convert the selection.
-        editor.cropRect = CGRect(x: currentRect.minX, y: bounds.height - currentRect.maxY,
-                                 width: currentRect.width, height: currentRect.height)
+        updateEditorCrop(for: editor)
         editor.onFinished = { [weak self] result in
             guard let self else { return }
             switch result {
             case .cancelled:
-                self.exitEditMode()
+                self.onAction?(.zero, .cancel)
             case .copy(let img):
                 self.onEditedAction?(img, .copy)
             case .save(let img):
@@ -483,38 +574,38 @@ private final class ShotOverlayView: NSView {
                 self.onEditedAction?(img, .pin)
             }
         }
-        if let toolbar {
-            addSubview(editor, positioned: .below, relativeTo: toolbar)
-        } else {
-            addSubview(editor)
+        editor.onToolChanged = { [weak self] tool in
+            guard let self else { return }
+            self.toolbar?.highlightTool(tool)
+            // Tool deselected (Esc / clicking the active tool) → keys return to
+            // the overlay so Enter / Space / colour-copy shortcuts work again.
+            if tool == nil { self.window?.makeFirstResponder(self) }
         }
+        addSubview(editor)
         editorView = editor
-
-        toolbar?.isHidden = true
-        let strip = EditToolbarView(editor: editor)
-        addSubview(strip)
-        editToolbar = strip
-        let size = strip.fittingSize
-        var y = currentRect.minY - size.height - 12
-        if y < 12 { y = currentRect.minY + 12 }
-        var x = currentRect.maxX - size.width
-        x = max(12, min(x, bounds.width - size.width - 12))
-        strip.frame = NSRect(x: x, y: y, width: size.width, height: size.height)
-
+        // The editor keeps first responder while attached: Esc deselects the
+        // active tool (or cancels), unhandled keys (R/H/S…) bubble up the
+        // responder chain to the overlay. Losing responder entirely was why
+        // Esc went dead after committing a text/caption field.
         window?.makeFirstResponder(editor)
-        needsDisplay = true
     }
 
-    private func exitEditMode() {
-        guard editMode else { return }
-        editMode = false
+    /// The editor view is flipped (top-left origin); convert the selection.
+    private func updateEditorCrop(for editor: AnnotationEditorView) {
+        editor.cropRect = CGRect(x: currentRect.minX, y: bounds.height - currentRect.maxY,
+                                 width: currentRect.width, height: currentRect.height)
+    }
+
+    func prepareForReselection() {
+        editorView?.currentTool = nil
+        window?.makeFirstResponder(self)
+    }
+
+    private func discardEditor() {
         editorView?.removeFromSuperview()
         editorView = nil
-        editToolbar?.removeFromSuperview()
-        editToolbar = nil
-        window?.makeFirstResponder(self)
-        layoutToolbar()
-        needsDisplay = true
+        toolbar?.removeFromSuperview()
+        toolbar = nil
     }
 
     // MARK: Drawing
@@ -528,13 +619,13 @@ private final class ShotOverlayView: NSView {
 
         let dim = NSColor.black.withAlphaComponent(0.35)
         if hasSelection, currentRect.width > 0, currentRect.height > 0 {
+            // Dim only the outside. Clearing the selection would punch a
+            // transparent hole through the frozen image into the live desktop.
+            let mask = NSBezierPath(rect: bounds)
+            mask.append(NSBezierPath(rect: currentRect))
+            mask.windingRule = .evenOdd
             dim.setFill()
-            bounds.fill()
-            // Reveal the selection.
-            NSGraphicsContext.current?.cgContext.setBlendMode(.copy)
-            NSColor.clear.setFill()
-            currentRect.fill()
-            NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+            mask.fill()
 
             NSColor.white.setStroke()
             let border = NSBezierPath(rect: currentRect)
@@ -547,9 +638,8 @@ private final class ShotOverlayView: NSView {
             drawHint()
         }
 
-        if !editMode, !hasSelection || startPoint == nil || (toolbar?.isHidden ?? true) {
+        if !hasSelection || startPoint == nil || (toolbar?.isHidden ?? true) {
             drawGuideLines(at: mouse)
-            drawMagnifier(at: mouse)
         }
     }
 
@@ -581,69 +671,12 @@ private final class ShotOverlayView: NSView {
         (text as NSString).draw(at: NSPoint(x: box.minX + pad, y: box.minY + pad / 2), withAttributes: attrs)
     }
 
-    /// iShot-style magnifier: 15×15 source pixels around the cursor, zoomed,
-    /// with the pixel colour in hex underneath.
-    private func drawMagnifier(at p: CGPoint) {
-        let scale = frozen.scale
-        let srcRadius = 7                       // source pixels each side
-        let cell: CGFloat = 10                  // zoomed cell size in points
-        let grid = CGFloat(srcRadius * 2 + 1)
-        let boxW = grid * cell
-        let boxH = grid * cell + 26
-
-        var x = p.x + 18
-        var y = p.y + 18
-        if x + boxW > bounds.width - 8 { x = p.x - boxW - 18 }
-        if y + boxH > bounds.height - 8 { y = p.y - boxH - 18 }
-
-        let px = Int((p.x * scale).rounded())
-        let pyTopOrigin = Int(((bounds.height - p.y) * scale).rounded())   // image pixels, top-left origin
-
-        let box = NSRect(x: x, y: y, width: boxW, height: boxH)
-        NSColor.black.withAlphaComponent(0.75).setFill()
-        NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6).fill()
-
-        var picked: (r: Int, g: Int, b: Int) = (0, 0, 0)
-        if let data = frozen.image.dataProvider?.data,
-           let base = CFDataGetBytePtr(data) {
-            let bpl = frozen.image.bytesPerRow
-            let imgW = frozen.image.width
-            let imgH = frozen.image.height
-            for gy in -srcRadius...srcRadius {
-                for gx in -srcRadius...srcRadius {
-                    let sx = px + gx
-                    let sy = pyTopOrigin + gy
-                    guard sx >= 0, sx < imgW, sy >= 0, sy < imgH else { continue }
-                    let off = sy * bpl + sx * 4
-                    let b = base[off], g = base[off + 1], r = base[off + 2]
-                    if gx == 0 && gy == 0 { picked = (Int(r), Int(g), Int(b)) }
-                    let cellRect = NSRect(x: x + CGFloat(gx + srcRadius) * cell,
-                                          y: y + 26 + CGFloat(srcRadius - gy) * cell,
-                                          width: cell, height: cell)
-                    NSColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1).setFill()
-                    cellRect.fill()
-                }
-            }
-        }
-        // Centre crosshair on the magnified grid.
-        NSColor.white.withAlphaComponent(0.9).setStroke()
-        let centre = NSRect(x: x + CGFloat(srcRadius) * cell, y: y + 26 + CGFloat(srcRadius) * cell,
-                            width: cell, height: cell)
-        NSBezierPath(rect: centre).stroke()
-
-        let hex = String(format: "#%02X%02X%02X", picked.r, picked.g, picked.b)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: NSColor.white
-        ]
-        let label = "\(hex)  \(px),\(pyTopOrigin)"
-        (label as NSString).draw(at: NSPoint(x: x + 8, y: y + 7), withAttributes: attrs)
-    }
-
     private func drawHint() {
         let text = scrollingMode
-            ? "Click a window or drag the scrolling area · Enter starts · Esc cancels"
-            : "Click a window or drag an area · double-click copies · Esc cancels"
+            ? L10n.tr("Click a window or drag the scrolling area · Enter starts · Esc cancels",
+                      "点击窗口或拖拽框选滚动区域 · 回车开始 · Esc 取消")
+            : L10n.tr("Click a window or drag an area · double-click copies · Esc cancels",
+                      "点击窗口或拖拽框选 · 双击复制 · Esc 取消")
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 14, weight: .medium),
             .foregroundColor: NSColor.white
@@ -659,17 +692,20 @@ private final class ShotOverlayView: NSView {
 
 // MARK: - Toolbar
 
-/// Floating frosted-glass action bar: grouped filled icons with separators,
-/// hover feedback and a drop shadow — replacing the old flat gray strip.
-private final class ShotToolbarView: NSView {
+/// Floating frosted-glass bar shown once a selection locks: annotation tools,
+/// a compact colour picker up front (iShot-style — no separate "annotate"
+/// step), then undo, mode actions and the finish buttons. Scrolling mode
+/// keeps a minimal variant since annotations don't apply to a live capture.
+final class ShotToolbarView: NSView {
     private let contentSize: NSSize
     override var fittingSize: NSSize { contentSize }
+    private var toolButtons: [ShapeTool: NSButton] = [:]
 
-    init(scrollingMode: Bool, onAction: @escaping (ShotAction) -> Void) {
+    init(editor: AnnotationEditorView?, scrollingMode: Bool, onAction: @escaping (ShotAction) -> Void) {
         func iconButton(_ symbol: String, _ tip: String, tinted tint: NSColor = .labelColor,
                         _ handler: @escaping () -> Void) -> NSButton {
             let b = OverlayHandlerButton(handler: handler)
-            let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
             b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
                 .withSymbolConfiguration(config)
             b.toolTip = tip
@@ -678,8 +714,8 @@ private final class ShotToolbarView: NSView {
             b.contentTintColor = tint
             b.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                b.widthAnchor.constraint(equalToConstant: 36),
-                b.heightAnchor.constraint(equalToConstant: 36)
+                b.widthAnchor.constraint(equalToConstant: 34),
+                b.heightAnchor.constraint(equalToConstant: 38)
             ])
             return b
         }
@@ -690,36 +726,71 @@ private final class ShotToolbarView: NSView {
             v.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
                 v.widthAnchor.constraint(equalToConstant: 1),
-                v.heightAnchor.constraint(equalToConstant: 20)
+                v.heightAnchor.constraint(equalToConstant: 22)
             ])
             return v
         }
 
-        let primary: [NSView]
-        if scrollingMode {
-            primary = [iconButton("play.fill", L10n.tr("Start scrolling capture (Enter)", "开始滚动截图 (Enter)")) { onAction(.scrolling) }]
-        } else {
-            primary = [
-                iconButton("rectangle.expand.vertical", L10n.tr("Scrolling screenshot (S)", "滚动截图 (S)")) { onAction(.scrolling) },
-                iconButton("pin.fill", L10n.tr("Pin to screen (T)", "贴到屏幕 (T)")) { onAction(.pin) },
-                iconButton("pencil.tip.crop.circle", L10n.tr("Annotate", "标注")) { onAction(.edit) }
+        var views: [NSView] = []
+        if scrollingMode || editor == nil {
+            views = [
+                iconButton("play.fill", L10n.tr("Start scrolling capture (Enter)", "开始滚动截图 (Enter)")) { onAction(.scrolling) },
+                separator(),
+                iconButton("doc.on.doc.fill", L10n.tr("Copy to clipboard (Enter)", "复制到剪贴板 (Enter)")) { onAction(.copy) },
+                iconButton("tray.and.arrow.down.fill", L10n.tr("Save… (Space)", "保存… (空格)")) { onAction(.save) },
+                separator(),
+                iconButton("xmark", L10n.tr("Cancel (Esc)", "取消 (Esc)"), tinted: .systemRed) { onAction(.cancel) }
             ]
-        }
-        let share = [
-            iconButton("doc.on.doc.fill", L10n.tr("Copy to clipboard (Enter)", "复制到剪贴板 (Enter)")) { onAction(.copy) },
-            iconButton("tray.and.arrow.down.fill", L10n.tr("Save… (Space)", "保存… (空格)")) { onAction(.save) }
-        ]
-        let cancel = iconButton("xmark", L10n.tr("Cancel (Esc)", "取消 (Esc)"), tinted: .systemRed) { onAction(.cancel) }
+        } else if let editor {
+            // Annotation tools — clicking the active tool deselects it and
+            // returns the overlay to region-selection behaviour.
+            var toolBtns: [ShapeTool: NSButton] = [:]
+            for tool in ShapeTool.allCases {
+                let b = iconButton(tool.symbol, tool.tip) { [weak editor] in
+                    guard let editor else { return }
+                    editor.currentTool = (editor.currentTool == tool) ? nil : tool
+                    if editor.currentTool != nil { editor.window?.makeFirstResponder(editor) }
+                }
+                toolBtns[tool] = b
+                views.append(b)
+            }
+            toolButtons = toolBtns
 
-        let sep1 = separator(), sep2 = separator()
-        let stack = NSStackView(views: primary + [sep1] + share + [sep2] + [cancel])
+            views.append(separator())
+
+            views.append(ShotColorButton(editor: editor))
+
+            views.append(separator())
+            views.append(iconButton("arrow.uturn.left", L10n.tr("Undo (⌘Z)", "撤销 (⌘Z)")) { [weak editor] in editor?.undo() })
+
+            views.append(separator())
+            views.append(iconButton("rectangle.expand.vertical", L10n.tr("Scrolling screenshot (S)", "滚动截图 (S)")) { onAction(.scrolling) })
+            views.append(iconButton("pin.fill", L10n.tr("Pin to screen (T)", "贴到屏幕 (T)")) { onAction(.pin) })
+            let ocr = OverlayHandlerButton { onAction(.ocr) }
+            ocr.title = "OCR"
+            ocr.font = .systemFont(ofSize: 12, weight: .semibold)
+            ocr.isBordered = false
+            ocr.toolTip = L10n.tr("Extract text from the original selection", "识别选区原始文字")
+            ocr.setAccessibilityLabel("OCR")
+            ocr.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                ocr.widthAnchor.constraint(equalToConstant: 42),
+                ocr.heightAnchor.constraint(equalToConstant: 38)
+            ])
+            views.append(ocr)
+
+            views.append(separator())
+            views.append(iconButton("tray.and.arrow.down.fill", L10n.tr("Save… (Space)", "保存… (空格)")) { onAction(.save) })
+            views.append(iconButton("checkmark", L10n.tr("Copy to clipboard (Enter)", "复制到剪贴板 (Enter)"), tinted: .systemGreen) { onAction(.copy) })
+
+            views.append(separator())
+            views.append(iconButton("xmark", L10n.tr("Cancel (Esc)", "取消 (Esc)"), tinted: .systemRed) { onAction(.cancel) })
+        }
+
+        let stack = NSStackView(views: views)
         stack.orientation = .horizontal
-        stack.spacing = 6
+        stack.spacing = 5
         stack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
-        if let lastPrimary = primary.last { stack.setCustomSpacing(10, after: lastPrimary) }
-        stack.setCustomSpacing(10, after: sep1)
-        if let lastShare = share.last { stack.setCustomSpacing(10, after: lastShare) }
-        stack.setCustomSpacing(10, after: sep2)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         contentSize = stack.fittingSize
@@ -769,6 +840,13 @@ private final class ShotToolbarView: NSView {
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Tints the active tool's button red; nil clears the highlight.
+    func highlightTool(_ tool: ShapeTool?) {
+        for (t, b) in toolButtons {
+            b.contentTintColor = (t == tool) ? .systemRed : .labelColor
+        }
+    }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .arrow)
@@ -821,168 +899,99 @@ private final class OverlayHandlerButton: NSButton {
     @objc private func fire() { handler() }
 }
 
-// MARK: - Edit toolbar (in-place annotation strip)
-
-/// Annotation strip shown in edit mode: tool picker, colour swatches, stroke
-/// widths, undo, and Copy / Save / Exit. Same frosted chrome as the action bar.
-private final class EditToolbarView: NSView {
-    private let contentSize: NSSize
-    override var fittingSize: NSSize { contentSize }
-    private var toolButtons: [ShapeTool: NSButton] = [:]
-    private var widthButtons: [NSButton] = []
+/// A single current-colour button with a transient palette below the toolbar.
+private final class ShotColorButton: NSButton {
     private weak var editor: AnnotationEditorView?
+    private let palette = NSPopover()
+    private var sizePicker: NSSegmentedControl!
 
     init(editor: AnnotationEditorView) {
-        func iconButton(_ symbol: String, _ tip: String, tinted tint: NSColor = .labelColor,
-                        _ handler: @escaping () -> Void) -> NSButton {
-            let b = OverlayHandlerButton(handler: handler)
-            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
-                .withSymbolConfiguration(config)
-            b.toolTip = tip
-            b.imageScaling = .scaleNone
-            b.isBordered = false
-            b.contentTintColor = tint
-            b.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                b.widthAnchor.constraint(equalToConstant: 32),
-                b.heightAnchor.constraint(equalToConstant: 36)
-            ])
-            return b
-        }
-        func separator() -> NSView {
-            let v = NSView()
-            v.wantsLayer = true
-            v.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.22).cgColor
-            v.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                v.widthAnchor.constraint(equalToConstant: 1),
-                v.heightAnchor.constraint(equalToConstant: 20)
-            ])
-            return v
-        }
-
-        // Tool picker.
-        var toolBtns: [ShapeTool: NSButton] = [:]
-        var views: [NSView] = ShapeTool.allCases.map { tool in
-            let b = iconButton(tool.symbol, tool.tip) { [weak editor] in editor?.currentTool = tool }
-            toolBtns[tool] = b
-            return b
-        }
-
-        views.append(separator())
-
-        // Colour swatches.
-        for color in [NSColor.systemRed, .systemOrange, .systemYellow, .systemGreen, .systemBlue] {
-            let b = EditSwatchButton(color: color) { [weak editor] in editor?.currentColor = color }
-            b.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                b.widthAnchor.constraint(equalToConstant: 20),
-                b.heightAnchor.constraint(equalToConstant: 20)
-            ])
-            views.append(b)
-        }
-
-        views.append(separator())
-
-        // Stroke widths.
-        var widthBtns: [NSButton] = []
-        for (i, w) in AnnotationEditorView.widths.enumerated() {
-            let b = iconButton(["smallcircle.fill", "circle.fill", "largecircle.fill"][i],
-                               ["Thin stroke", "Medium stroke", "Thick stroke"][i]) { [weak editor] in
-                editor?.currentWidth = w
-            }
-            b.tag = i
-            widthBtns.append(b)
-            views.append(b)
-        }
-
-        views.append(separator())
-
-        views.append(iconButton("arrow.uturn.left", L10n.tr("Undo (⌘Z)", "撤销 (⌘Z)")) { [weak editor] in editor?.undo() })
-
-        views.append(separator())
-
-        views.append(iconButton("doc.on.doc.fill", L10n.tr("Copy (Enter)", "复制 (Enter)"), tinted: .systemGreen) { [weak editor] in
-            guard let editor else { return }
-            editor.finish(.copy(editor.flattenedImage()))
-        })
-        views.append(iconButton("tray.and.arrow.down.fill", L10n.tr("Save…", "保存…")) { [weak editor] in
-            guard let editor else { return }
-            editor.finish(.save(editor.flattenedImage()))
-        })
-        views.append(iconButton("xmark", L10n.tr("Back to selection (Esc)", "返回框选 (Esc)"), tinted: .systemRed) { [weak editor] in
-            editor?.finish(.cancelled)
-        })
-
-        let stack = NSStackView(views: views)
-        stack.orientation = .horizontal
-        stack.spacing = 5
-        stack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        contentSize = stack.fittingSize
         self.editor = editor
-        self.toolButtons = toolBtns
-        self.widthButtons = widthBtns
-
-        super.init(frame: NSRect(origin: .zero, size: contentSize))
-
-        wantsLayer = true
-        layer?.cornerRadius = 14
-        layer?.masksToBounds = false
-        layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.32
-        layer?.shadowRadius = 14
-        layer?.shadowOffset = NSSize(width: 0, height: -4)
-
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.blendingMode = .withinWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 14
-        effect.layer?.masksToBounds = true
-        effect.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(effect)
-        effect.addSubview(stack)
+        super.init(frame: .zero)
+        title = ""
+        isBordered = false
+        image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: L10n.tr("Annotation colour", "标注颜色"))?
+            .withSymbolConfiguration(.init(pointSize: 19, weight: .regular))
+        contentTintColor = editor.currentColor
+        toolTip = L10n.tr("Choose annotation colour", "选择标注颜色")
+        setAccessibilityLabel(toolTip)
+        target = self
+        action = #selector(togglePalette)
+        translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            effect.leadingAnchor.constraint(equalTo: leadingAnchor),
-            effect.trailingAnchor.constraint(equalTo: trailingAnchor),
-            effect.topAnchor.constraint(equalTo: topAnchor),
-            effect.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: effect.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: effect.bottomAnchor)
+            widthAnchor.constraint(equalToConstant: 34),
+            heightAnchor.constraint(equalToConstant: 38)
         ])
 
-        let border = ToolbarBorderView()
-        border.layer?.cornerRadius = 14
-        border.layer?.borderWidth = 0.5
-        border.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
-        border.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(border)
-        NSLayoutConstraint.activate([
-            border.leadingAnchor.constraint(equalTo: leadingAnchor),
-            border.trailingAnchor.constraint(equalTo: trailingAnchor),
-            border.topAnchor.constraint(equalTo: topAnchor),
-            border.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
-
-        editor.onToolChanged = { [weak self] tool in self?.highlightTool(tool) }
-        highlightTool(editor.currentTool)
+        let colours: [(NSColor, String)] = [
+            (.systemRed, L10n.tr("Red", "红色")),
+            (.systemOrange, L10n.tr("Orange", "橙色")),
+            (.systemYellow, L10n.tr("Yellow", "黄色")),
+            (.systemGreen, L10n.tr("Green", "绿色")),
+            (.systemBlue, L10n.tr("Blue", "蓝色"))
+        ]
+        let swatches = colours.map { colour, name in
+            let button = EditSwatchButton(color: colour) { [weak self] in
+                guard let self else { return }
+                self.editor?.currentColor = colour
+                self.contentTintColor = colour
+                self.palette.performClose(nil)
+                if let editor = self.editor, editor.currentTool != nil {
+                    editor.window?.makeFirstResponder(editor)
+                }
+            }
+            button.toolTip = name
+            button.setAccessibilityLabel(name)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                button.widthAnchor.constraint(equalToConstant: 20),
+                button.heightAnchor.constraint(equalToConstant: 20)
+            ])
+            return button
+        }
+        let colourRow = NSStackView(views: swatches)
+        colourRow.orientation = .horizontal
+        colourRow.spacing = 12
+        sizePicker = NSSegmentedControl(labels: [L10n.tr("Small", "小"), L10n.tr("Large", "大")],
+                                       trackingMode: .selectOne, target: self, action: #selector(changeTextSize))
+        sizePicker.selectedSegment = editor.currentTextSize >= 30 ? 1 : 0
+        sizePicker.setAccessibilityLabel(L10n.tr("Text size", "文字大小"))
+        sizePicker.setToolTip("20 pt", forSegment: 0)
+        sizePicker.setToolTip("30 pt", forSegment: 1)
+        let sizeRow = NSStackView(views: [NSTextField(labelWithString: L10n.tr("Text", "文字")), sizePicker])
+        sizeRow.orientation = .horizontal
+        sizeRow.spacing = 12
+        let stack = NSStackView(views: [colourRow, sizeRow])
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        stack.frame = NSRect(x: 0, y: 0, width: 176, height: 84)
+        let controller = NSViewController()
+        controller.view = stack
+        palette.contentViewController = controller
+        palette.contentSize = stack.frame.size
+        palette.behavior = .transient
+        palette.animates = false
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private func highlightTool(_ tool: ShapeTool) {
-        for (t, b) in toolButtons {
-            b.contentTintColor = (t == tool) ? .systemRed : .labelColor
+    @objc private func changeTextSize() {
+        editor?.currentTextSize = sizePicker.selectedSegment == 1 ? 30 : 20
+        palette.performClose(nil)
+    }
+
+    @objc private func togglePalette() {
+        sizePicker.selectedSegment = (editor?.currentTextSize ?? 20) >= 30 ? 1 : 0
+        if palette.isShown {
+            palette.performClose(nil)
+        } else {
+            palette.show(relativeTo: bounds, of: self, preferredEdge: .minY)
         }
     }
 
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .arrow)
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { palette.performClose(nil) }
+        super.viewWillMove(toWindow: newWindow)
     }
 }
 

@@ -11,6 +11,7 @@ struct ExportOptions {
     var fps: Int
     var format: OutputFormat             // .mp4 / .mov / .gif
     var codec: VideoCodec                // used for mp4/mov
+    var sourceCropRect: CGRect? = nil    // oriented source pixels, top-left origin
 }
 
 /// Re-encodes a recorded intermediate into the user's chosen output, applying
@@ -64,6 +65,7 @@ enum ExportEngine {
         // Oriented source size.
         let oriented = naturalSize.applying(preferred)
         let srcSize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
+        let crop = options.sourceCropRect ?? CGRect(origin: .zero, size: srcSize)
         let target = CGSize(width: max(2, options.renderSize.width.rounded()),
                             height: max(2, options.renderSize.height.rounded()))
 
@@ -81,9 +83,11 @@ enum ExportEngine {
         instruction.timeRange = CMTimeRange(start: .zero, duration: assetDuration)
 
         let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-        let sx = target.width / max(1, srcSize.width)
-        let sy = target.height / max(1, srcSize.height)
-        let transform = preferred.concatenating(CGAffineTransform(scaleX: sx, y: sy))
+        let sx = target.width / max(1, crop.width)
+        let sy = target.height / max(1, crop.height)
+        let transform = preferred
+            .concatenating(CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+            .concatenating(CGAffineTransform(scaleX: sx, y: sy))
         layer.setTransform(transform, at: .zero)
         instruction.layerInstructions = [layer]
         composition.instructions = [instruction]

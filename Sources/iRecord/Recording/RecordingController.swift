@@ -135,9 +135,11 @@ final class RecordingController: ObservableObject {
 
     // MARK: - Control
 
-    func startRecording(target: CaptureTarget) {
+    func startRecording(target: CaptureTarget, automation: Bool = false) {
         guard !isRecording else { return }
+        if !automation { AutomationController.shared.releaseCapture() }
         lastErrorMessage = nil
+        state = .preparing
 
         // Kap-style flow: capture a high-quality intermediate (native size, H.264
         // MOV). Output size / fps / format are chosen afterwards in the editor.
@@ -238,7 +240,7 @@ final class RecordingController: ObservableObject {
 
     private static func makeTempOutputURL(format: OutputFormat) -> URL {
         let dir = FileManager.default.temporaryDirectory
-        let stamp = Int(Date().timeIntervalSince1970)
+        let stamp = UUID().uuidString
         // GIF is converted from an MP4 first.
         let ext = (format == .gif) ? "mp4" : format.fileExtension
         return dir.appendingPathComponent("iRecord-\(stamp).\(ext)")

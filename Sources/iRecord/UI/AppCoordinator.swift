@@ -137,9 +137,36 @@ final class AppCoordinator: NSObject {
         }
     }
 
+    /// Install the bundled tool for this user; no administrator privileges.
+    func installCommandLineTool(uninstall: Bool = false) {
+        let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/irecord")
+        Task {
+            let result: (Bool, String) = await Task.detached {
+                let process = Process()
+                process.executableURL = executable
+                process.arguments = [uninstall ? "uninstall" : "install"]
+                let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+                do {
+                    try process.run()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    return (process.terminationStatus == 0, String(data: data, encoding: .utf8) ?? "")
+                } catch { return (false, error.localizedDescription) }
+            }.value
+            let alert = NSAlert()
+            controller.uiRefresh.toggle()
+            alert.messageText = result.0 ? (uninstall ? "命令行工具已卸载" : "命令行工具已安装") : "命令行工具操作失败"
+            alert.informativeText = uninstall && result.0 ? "App 和已有录屏保持不变。" : result.0
+                ? "打开新的终端即可使用 irecord。\n\n快速检查：irecord status --json\n卸载命令：irecord uninstall\n\n安装在 ~/.local/bin，无需管理员权限。"
+                : result.1
+            alert.runModal()
+        }
+    }
+
     // MARK: Finished
 
     private func handleFinished(_ url: URL) {
+        if AutomationController.shared.acceptFinished(url) { return }
         // Open the Kap-style editor where the user picks output params and exports.
         EditorPresenter.shared.present(
             sourceURL: url,

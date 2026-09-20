@@ -16,9 +16,18 @@ struct WindowInfo: Identifiable, Hashable {
     let id: CGWindowID
     let title: String
     let appName: String
+    let frame: CGRect
 }
 
 enum ScreenInfo {
+    static func filterWindows(_ windows: [WindowInfo], query: String) -> [WindowInfo] {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return windows }
+        return windows.filter {
+            $0.title.localizedStandardContains(term) || $0.appName.localizedStandardContains(term)
+        }
+    }
+
     /// Lists capturable on-screen windows via ScreenCaptureKit, filtered to real
     /// application windows (visible, reasonably sized, titled or named) and sorted
     /// by app then title. Requires Screen Recording permission.
@@ -35,7 +44,7 @@ enum ScreenInfo {
             let appName = win.owningApplication?.applicationName ?? "Unknown"
             guard !appName.isEmpty else { return nil }
             let title = (win.title?.isEmpty == false ? win.title! : appName)
-            return WindowInfo(id: win.windowID, title: title, appName: appName)
+            return WindowInfo(id: win.windowID, title: title, appName: appName, frame: win.frame)
         }
         return result.sorted {
             $0.appName == $1.appName ? $0.title < $1.title : $0.appName < $1.appName

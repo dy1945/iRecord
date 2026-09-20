@@ -16,6 +16,7 @@ struct ControlPanelView: View {
     @State private var saveToVisible = false
     @State private var windows: [WindowInfo] = []
     @State private var loadingWindows = false
+    @State private var windowSearch = ""
 
     private var theme: PanelTheme { PanelTheme.make(dark: colorScheme == .dark) }
 
@@ -377,6 +378,7 @@ struct ControlPanelView: View {
     private func openWindowPicker() {
         saveToVisible = false
         windowPickerVisible = true
+        windowSearch = ""
         loadingWindows = true
         windows = []
         Task {
@@ -386,6 +388,10 @@ struct ControlPanelView: View {
                 loadingWindows = false
             }
         }
+    }
+
+    private var filteredWindows: [WindowInfo] {
+        ScreenInfo.filterWindows(windows, query: windowSearch)
     }
 
     private var windowPicker: some View {
@@ -399,15 +405,37 @@ struct ControlPanelView: View {
                 if loadingWindows { ProgressView().controlSize(.small) } else { Color.clear.frame(width: 44, height: 1) }
             }
 
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundColor(theme.textSecondary)
+                TextField(L10n.tr("Search app or window title", "搜索应用名或窗口标题"), text: $windowSearch)
+                    .textFieldStyle(.plain)
+                    .accessibilityLabel(L10n.tr("Search windows", "搜索窗口"))
+                if !windowSearch.isEmpty {
+                    Button { windowSearch = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundColor(theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L10n.tr("Clear search", "清空搜索"))
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(theme.textSecondary.opacity(0.08)))
+
             if !loadingWindows && windows.isEmpty {
                 Text(L10n.tr("No capturable windows found.", "未找到可录制的窗口。"))
                     .font(.system(size: 12)).foregroundColor(theme.textSecondary)
                     .padding(.horizontal, 8)
             }
 
+            if !loadingWindows && !windows.isEmpty && filteredWindows.isEmpty {
+                Text(L10n.tr("No matching windows.", "没有匹配的窗口。"))
+                    .font(.system(size: 12)).foregroundColor(theme.textSecondary)
+                    .padding(.horizontal, 8)
+            }
+
             ScrollView {
                 card {
-                    ForEach(Array(windows.enumerated()), id: \.element.id) { idx, win in
+                    ForEach(Array(filteredWindows.enumerated()), id: \.element.id) { idx, win in
                         if idx > 0 { separator(inset: 14) }
                         HoverRow(theme: theme, height: 50, action: {
                             windowPickerVisible = false

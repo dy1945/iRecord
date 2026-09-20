@@ -162,6 +162,12 @@ private struct SettingsRootView: View {
             })
     }
 
+    private var cliInstalled: Bool {
+        let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/irecord").path
+        let expected = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/irecord").path
+        return (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) == expected
+    }
+
     private var generalTab: some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionHeader("textformat", "LANGUAGE", "语言", tint: .accentColor)
@@ -198,6 +204,31 @@ private struct SettingsRootView: View {
                                 controller.uiRefresh.toggle()
                             }))
             }
+
+            sectionHeader("terminal", "COMMAND LINE", "命令行工具", tint: .accentColor)
+            card {
+                HStack(spacing: 10) {
+                    Image(systemName: "terminal")
+                        .foregroundColor(theme.textSecondary)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("irecord").font(.system(size: 12.5))
+                        Text(cliInstalled ? L10n.tr("Installed · ~/.local/bin/irecord", "已安装 · ~/.local/bin/irecord") : L10n.tr("Let agents and scripts control recording", "让 Agent 和脚本直接控制录屏"))
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.textSecondary)
+                    }
+                    Spacer()
+                    Button(cliInstalled ? L10n.tr("Reinstall", "重新安装") : L10n.tr("Install", "安装")) {
+                        AppCoordinator.shared.installCommandLineTool()
+                    }
+                    if cliInstalled {
+                        Button(L10n.tr("Uninstall", "卸载")) { AppCoordinator.shared.installCommandLineTool(uninstall: true) }
+                    }
+                }
+                .padding(14)
+            }
+            footnote(L10n.tr("No administrator password needed. After installation, open a new terminal and run irecord --help.",
+                            "无需管理员密码。安装后打开新终端，输入 irecord --help。"))
 
             footnote(L10n.tr("Applies immediately — no restart needed; \"System\" follows the system language.",
                              "语言切换立即生效，无需重启。"))

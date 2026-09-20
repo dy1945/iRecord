@@ -20,6 +20,8 @@ final class ExportEditorWindowController: NSWindowController {
     private var trimStart: CMTime?
     private var trimEnd: CMTime?
     private var didExportOrSave = false
+    private var isConverting = false
+    private var closeConfirmationVisible = false
 
     // Controls
     private let widthField = NSTextField()
@@ -333,6 +335,8 @@ final class ExportEditorWindowController: NSWindowController {
     }
 
     private func setBusy(_ busy: Bool, message: String) {
+        isConverting = busy
+        window?.standardWindowButton(.closeButton)?.isEnabled = !busy
         convertButton.isEnabled = !busy
         formatPopup.isEnabled = !busy
         destinationPopup.isEnabled = !busy
@@ -405,6 +409,26 @@ final class ExportEditorWindowController: NSWindowController {
 // MARK: - NSWindowDelegate
 
 extension ExportEditorWindowController: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !isConverting else { return false }
+        guard !didExportOrSave else { return true }
+        guard !closeConfirmationVisible else { return false }
+        closeConfirmationVisible = true
+        let wasPlaying = player.rate > 0
+        player.pause()
+        let sheet = PreviewCloseSheet()
+        sender.beginSheet(sheet) { [weak self, weak sender] response in
+            guard let self else { return }
+            self.closeConfirmationVisible = false
+            if response == .alertSecondButtonReturn {
+                sender?.close()
+            } else if wasPlaying {
+                self.player.play()
+            }
+        }
+        return false
+    }
+
     func windowWillClose(_ notification: Notification) {
         player.pause()
         // Clean up the recording intermediate if the user closed without exporting.
@@ -413,6 +437,53 @@ extension ExportEditorWindowController: NSWindowDelegate {
         }
         EditorPresenter.shared.didClose(self)
     }
+}
+
+/// Compact confirmation without NSAlert's reserved application-icon area.
+@MainActor
+private final class PreviewCloseSheet: NSWindow {
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 440, height: 142),
+                   styleMask: [.titled], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
+        let title = NSTextField(labelWithString: L10n.tr("Close video preview?", "关闭视频预览？"))
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        let message = NSTextField(wrappingLabelWithString: L10n.tr(
+            "This recording has not been exported. Closing will discard it and your edits.",
+            "当前录屏尚未导出，关闭后将丢弃录屏及本次编辑。"))
+        message.font = .systemFont(ofSize: 13)
+        message.textColor = .secondaryLabelColor
+        message.preferredMaxLayoutWidth = 400
+        let keep = NSButton(title: L10n.tr("Continue Editing", "继续编辑"), target: self, action: #selector(keepEditing))
+        keep.bezelStyle = .rounded
+        keep.keyEquivalent = "\r"
+        let discard = NSButton(title: L10n.tr("Discard and Close", "放弃并关闭"), target: self, action: #selector(discardRecording))
+        discard.bezelStyle = .rounded
+        let buttons = NSStackView(views: [discard, keep])
+        buttons.orientation = .horizontal
+        buttons.spacing = 12
+        guard let content = contentView else { return }
+        for view in [title, message, buttons] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            title.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            message.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
+            message.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            message.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            buttons.topAnchor.constraint(greaterThanOrEqualTo: message.bottomAnchor, constant: 18),
+            buttons.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18)
+        ])
+        defaultButtonCell = keep.cell as? NSButtonCell
+    }
+
+    @objc private func keepEditing() { sheetParent?.endSheet(self, returnCode: .alertFirstButtonReturn) }
+    @objc private func discardRecording() { sheetParent?.endSheet(self, returnCode: .alertSecondButtonReturn) }
+    override func cancelOperation(_ sender: Any?) { keepEditing() }
 }
 
 /// Retains editor windows for their lifetime (NSWindowController would otherwise

@@ -39,6 +39,14 @@ struct iRecordMain {
             CFRunLoopRun()
         }
 
+        if CommandLine.arguments.contains("--windowflowtest") {
+            SelfTest.runWindowFlow()
+        }
+
+        if CommandLine.arguments.contains("--ocrtest") || CommandLine.arguments.contains("--ocrtest-ui") {
+            SelfTest.runOCR(showWindow: CommandLine.arguments.contains("--ocrtest-ui"))
+        }
+
         // Headless stitch-engine check: `iRecord --stitchtest`
         if CommandLine.arguments.contains("--stitchtest") {
             SelfTest.runStitch()
@@ -47,6 +55,18 @@ struct iRecordMain {
         // Headless still-screenshot check: `iRecord --shottest`
         if CommandLine.arguments.contains("--shottest") {
             SelfTest.runShot()
+        }
+
+        if CommandLine.arguments.contains("--cursortest") {
+            SelfTest.runShotCursor()
+        }
+
+        // Headless annotation-toolbar check: `iRecord --toolbartest`
+        // Renders the merged screenshot toolbar plus a canvas with stamped
+        // markers / an arrow / a rect in a small floating window, then prints
+        // its window number so CI can `screencapture -l <n>` it.
+        if CommandLine.arguments.contains("--toolbartest") {
+            SelfTest.runToolbar()
         }
 
         // Headless settings-window check: `iRecord --settingstest [tab]`
@@ -119,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeState()
         // Touch the coordinator so its onFinished hook is wired up.
         _ = AppCoordinator.shared
+        AutomationController.shared.startServer()
         setupGlobalShortcuts()
     }
 

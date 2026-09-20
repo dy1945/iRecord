@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AVFoundation
 import CoreGraphics
 import ImageIO
@@ -15,6 +16,190 @@ import ScreenCaptureKit
 /// queue, so this test must keep the main run loop spinning (never block it) and
 /// call `exit()` from within a callback once finished.
 enum SelfTest {
+    /// Exercises search and the actual preview close sheet against a disposable file.
+    @MainActor
+    static func runWindowFlow() -> Never {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let windows = [WindowInfo(id: 1, title: "Build logs", appName: "iTerm2", frame: .zero),
+                       WindowInfo(id: 2, title: "产品周报", appName: "Preview", frame: .zero),
+                       WindowInfo(id: 3, title: "Documentation", appName: "Chrome", frame: .zero)]
+        precondition(ScreenInfo.filterWindows(windows, query: " ITERM ").map(\.id) == [1])
+        precondition(ScreenInfo.filterWindows(windows, query: "LOGS").map(\.id) == [1])
+        precondition(ScreenInfo.filterWindows(windows, query: "周报").map(\.id) == [2])
+        precondition(ScreenInfo.filterWindows(windows, query: " ") == windows)
+        precondition(ScreenInfo.filterWindows(windows, query: "absent").isEmpty)
+        print("[windowflowtest] PASS: app/title search, Chinese, case, whitespace, no matches")
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("irecord-close-test-\(UUID().uuidString).mov")
+        try! Data("disposable close lifecycle fixture".utf8).write(to: source)
+        let controller = ExportEditorWindowController(sourceURL: source, defaultDirectory: source.deletingLastPathComponent(), captureFPS: 30, onExported: nil)
+        controller.present()
+        Task { @MainActor in
+            defer { try? FileManager.default.removeItem(at: source) }
+            guard let window = controller.window else { fatalError("No preview") }
+            window.performClose(nil)
+            precondition(window.isVisible && FileManager.default.fileExists(atPath: source.path))
+            guard let firstSheet = window.attachedSheet else { fatalError("Missing close confirmation") }
+            if let content = firstSheet.contentView {
+                content.layoutSubtreeIfNeeded()
+                let title = content.subviews.compactMap { $0 as? NSTextField }.first {
+                    $0.stringValue == L10n.tr("Close video preview?", "关闭视频预览？")
+                }
+                precondition(title != nil && abs(content.bounds.maxY - title!.frame.maxY - 20) < 1,
+                             "Close confirmation has excessive top whitespace")
+                if let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                    content.cacheDisplay(in: content.bounds, to: bitmap)
+                    try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/irecord-close-sheet.png"))
+                }
+            }
+            window.performClose(nil)
+            precondition(window.attachedSheet === firstSheet, "Duplicate close confirmation")
+            window.endSheet(firstSheet, returnCode: .alertFirstButtonReturn)
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            precondition(window.isVisible && FileManager.default.fileExists(atPath: source.path), "Cancel discarded recording")
+            print("[windowflowtest] PASS: close prompts once, Continue Editing preserves recording")
+            window.performClose(nil)
+            guard let secondSheet = window.attachedSheet else { fatalError("Cannot reconfirm close") }
+            window.endSheet(secondSheet, returnCode: .alertSecondButtonReturn)
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            precondition(!window.isVisible && !FileManager.default.fileExists(atPath: source.path), "Confirmed close did not clean up")
+            print("[windowflowtest] PASS: confirmed close discards only the test recording")
+            fflush(stdout)
+            exit(0)
+        }
+        app.run()
+        exit(1)
+    }
+
+    /// Real Vision recognition: multiline Chinese/English, crop exclusion and blank input.
+    @MainActor
+    static func runOCR(showWindow: Bool = false) -> Never {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        func fixture(_ withText: Bool) -> CGImage {
+            let image = NSImage(size: NSSize(width: 900, height: 400))
+            image.lockFocus()
+            NSColor.white.setFill()
+            NSRect(x: 0, y: 0, width: 900, height: 400).fill()
+            if withText {
+                let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 36), .foregroundColor: NSColor.black]
+                ("Hello OCR 123" as NSString).draw(at: NSPoint(x: 40, y: 280), withAttributes: attrs)
+                ("截图文字识别" as NSString).draw(at: NSPoint(x: 40, y: 180), withAttributes: attrs)
+                ("OUTSIDE" as NSString).draw(at: NSPoint(x: 650, y: 80), withAttributes: attrs)
+            }
+            image.unlockFocus()
+            return image.cgImage(forProposedRect: nil, context: nil, hints: nil)!
+        }
+        let original = fixture(true)
+        let frozen = ScreenshotCapture.FrozenDisplay(displayID: CGMainDisplayID(), image: original,
+                                                       frame: CGRect(x: 0, y: 0, width: 900, height: 400))
+        let cropped = ScreenshotCapture.crop(globalRect: CGRect(x: 0, y: 0, width: 600, height: 400), from: [frozen])!
+        let blank = fixture(false)
+        let editor = AnnotationEditorView(image: NSImage(cgImage: blank, size: NSSize(width: 900, height: 400)))
+        let testWindow = NSWindow(contentRect: editor.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+        testWindow.contentView = editor
+        editor.currentTool = .text
+        func event(_ type: NSEvent.EventType, _ point: CGPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: editor.convert(point, to: nil), modifierFlags: [],
+                              timestamp: 0, windowNumber: testWindow.windowNumber, context: nil,
+                              eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        editor.mouseDown(with: event(.leftMouseDown, CGPoint(x: 80, y: 80)))
+        guard let field = editor.subviews.compactMap({ $0 as? NSTextField }).first,
+              field.font?.pointSize == 20 else { print("[ocrtest] FAIL: small text size"); exit(1) }
+        field.stringValue = "Move text"
+        editor.currentTextSize = 30
+        guard field.font?.pointSize == 30 else { print("[ocrtest] FAIL: active text size"); exit(1) }
+        editor.mouseDown(with: event(.leftMouseDown, CGPoint(x: 84, y: 84)))
+        editor.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: 124, y: 124)))
+        guard NSCursor.current == NSCursor.closedHand else { print("[ocrtest] FAIL: dragging cursor"); exit(1) }
+        editor.mouseUp(with: event(.leftMouseUp, CGPoint(x: 124, y: 124)))
+        guard NSCursor.current == NSCursor.openHand else { print("[ocrtest] FAIL: released cursor"); exit(1) }
+        guard editor.shapes.count == 1, editor.shapes[0].fontSize == 30,
+              editor.shapes[0].start == CGPoint(x: 120, y: 120) else {
+            print("[ocrtest] FAIL: committed text move/size"); exit(1)
+        }
+        print("[ocrtest] PASS: 20/30 pt text and committed text dragging")
+        Task { @MainActor in
+            do {
+                let text = try await ScreenshotOCR.recognize(cropped)
+                print("[ocrtest] result: \(text)")
+                guard text.replacingOccurrences(of: " ", with: "").contains("HelloOCR123"), text.contains("截图文字识别"),
+                      text.contains("\n"), !text.contains("OUTSIDE") else {
+                    print("[ocrtest] FAIL: multiline/crop mismatch"); exit(1)
+                }
+                let empty = try await ScreenshotOCR.recognize(blank)
+                guard empty.isEmpty else { print("[ocrtest] FAIL: blank input"); exit(1) }
+                print("[ocrtest] PASS: Chinese, English, line breaks, selection crop, blank image")
+                fflush(stdout)
+                if showWindow {
+                    OCRResultController.shared.showLoading { exit(0) }
+                    OCRResultController.shared.showResult(CommandLine.arguments.contains("--blank") ? "" : text)
+                } else {
+                    verifyOCRResultWindow(text: text)
+                    exit(0)
+                }
+            } catch { print("[ocrtest] FAIL: \(error)"); exit(1) }
+        }
+        if showWindow { app.run() } else { CFRunLoopRun() }
+        exit(0)
+    }
+
+
+    @MainActor
+    private static func verifyOCRResultWindow(text: String) {
+        // Preserve the user's clipboard while exercising the actual Copy All button.
+        let pasteboard = NSPasteboard.general
+        let saved = (pasteboard.pasteboardItems ?? []).map { item in
+            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+        }
+        defer {
+            pasteboard.clearContents()
+            let items = saved.map { entries -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in entries { item.setData(data, forType: type) }
+                return item
+            }
+            if !items.isEmpty { pasteboard.writeObjects(items) }
+        }
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        func controls() -> (NSWindow, NSTextView, NSButton, NSButton, [NSTextField]) {
+            guard let window = NSApp.windows.first(where: { $0.title == L10n.tr("OCR — Extract Text", "OCR — 提取文字") && $0.isVisible }),
+                  let content = window.contentView else { fatalError("Missing OCR window") }
+            let views = descendants(content)
+            guard let textView = views.compactMap({ $0 as? NSTextView }).first,
+                  let copy = views.compactMap({ $0 as? NSButton }).first(where: { $0.title == L10n.tr("Copy All", "复制全部") }),
+                  let retry = views.compactMap({ $0 as? NSButton }).first(where: { $0.title == L10n.tr("Select Again", "重新框选") }) else { fatalError("Missing OCR controls") }
+            return (window, textView, copy, retry, views.compactMap { $0 as? NSTextField })
+        }
+        var closed = false
+        OCRResultController.shared.showLoading { closed = true }
+        OCRResultController.shared.showResult(text)
+        let (window, editor, copy, retry, _) = controls()
+        precondition(editor.isEditable && copy.isEnabled && retry.isHidden)
+        let edited = text + "\nEdited text 456"
+        editor.string = edited
+        copy.performClick(nil)
+        precondition(pasteboard.string(forType: .string) == edited, "Copy All lost edited text or line breaks")
+        editor.string = ""
+        let paste = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                                    timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                    characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9)!
+        precondition(editor.performKeyEquivalent(with: paste) && editor.string == edited, "Paste shortcut failed")
+        window.close()
+        precondition(closed)
+        var reselect = false
+        OCRResultController.shared.showLoading { reselect = true }
+        OCRResultController.shared.showResult("")
+        let (_, emptyEditor, emptyCopy, again, labels) = controls()
+        precondition(!emptyEditor.isEditable && !emptyCopy.isEnabled && !again.isHidden)
+        precondition(labels.contains { $0.stringValue == L10n.tr("No text recognized", "未识别到文字") })
+        again.performClick(nil)
+        precondition(reselect, "Select Again did not return control")
+        print("[ocrtest] PASS: editable result, Copy All, line breaks, Cmd+V, empty message, Select Again callback")
+    }
 
     /// Headless verification of the scrolling-screenshot stitch engine.
     /// Builds a synthetic tall "page", simulates scroll frames (variable step
@@ -131,10 +316,178 @@ enum SelfTest {
         exit(7)
     }
 
+    /// Headless verification of the merged screenshot toolbar: renders the bar
+    /// plus a canvas pre-populated with markers (one captioned), an arrow, a
+    /// rect, a mosaic patch and a moved text — all by synthetic mouse events.
+    /// `iRecord --toolbartest`, then `screencapture -l <windowNumber>`.
+    static func runToolbar() -> Never {
+        setvbuf(stdout, nil, _IONBF, 0)   // unbuffered: draw-time prints must survive
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        // Backdrop at 2× pixels (same scale math as the fullscreen overlay):
+        // a dense block grid (mosaic always has content under it) plus one
+        // black diagonal — any flip error in mosaic baking or flatten export
+        // shows up immediately.
+        let size = NSSize(width: 620, height: 380)
+        guard let ctx = CGContext(data: nil, width: 1240, height: 760,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+              let cg = { () -> CGImage? in
+                  ctx.setFillColor(NSColor(white: 0.93, alpha: 1).cgColor)
+                  ctx.fill(CGRect(x: 0, y: 0, width: 1240, height: 760))
+                  let palette = [NSColor.systemBlue, .systemOrange, .systemTeal, .systemPurple]
+                  var i = 0
+                  for row in 0..<6 {
+                      for col in 0..<8 where (row + col) % 2 == 0 {
+                          ctx.setFillColor(palette[i % palette.count].cgColor)
+                          ctx.fill(CGRect(x: 30 + col * 150, y: 30 + row * 120, width: 90, height: 70))
+                          i += 1
+                      }
+                  }
+                  ctx.setStrokeColor(NSColor.black.cgColor)
+                  ctx.setLineWidth(6)
+                  ctx.move(to: CGPoint(x: 0, y: 0))
+                  ctx.addLine(to: CGPoint(x: 1240, y: 760))
+                  ctx.strokePath()
+                  // Guaranteed content under the mosaic test rect (view coords
+                  // 400,220–560,340 → data rows 440–680 → ctx y 80–320):
+                  // red field with thin black stripes — pixelation is obvious.
+                  ctx.setFillColor(NSColor.systemRed.cgColor)
+                  ctx.fill(CGRect(x: 800, y: 80, width: 320, height: 240))
+                  ctx.setFillColor(NSColor.black.cgColor)
+                  for sx in stride(from: 812, through: 1110, by: 24) {
+                      ctx.fill(CGRect(x: sx, y: 80, width: 6, height: 240))
+                  }
+                  return ctx.makeImage()
+              }() else {
+            print("[toolbartest] FAIL: could not build backdrop"); exit(5)
+        }
+        let img = NSImage(cgImage: cg, size: size)
+
+        let editor = AnnotationEditorView(image: img)
+        let tb = ShotToolbarView(editor: editor, scrollingMode: false) { _ in }
+        let tbSize = tb.fittingSize
+
+        let winW = max(tbSize.width + 24, size.width + 24)
+        let winH = tbSize.height + 12 + size.height + 16
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: winW, height: winH),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = "toolbartest"
+        win.isReleasedWhenClosed = false
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: winW, height: winH))
+        win.contentView = content
+        tb.frame = NSRect(x: (winW - tbSize.width) / 2, y: winH - tbSize.height - 8,
+                          width: tbSize.width, height: tbSize.height)
+        content.addSubview(tb)
+        editor.frame = NSRect(x: (winW - size.width) / 2, y: 8, width: size.width, height: size.height)
+        content.addSubview(editor)
+        win.center()
+        win.makeKeyAndOrderFront(nil)
+        print("[toolbartest] windowNumber=\(win.windowNumber) frame=\(win.frame)")
+        fflush(stdout)
+
+        func mouse(_ type: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: editor.convert(p, to: nil),
+                               modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: win.windowNumber, context: nil,
+                               eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        func click(_ p: NSPoint) {
+            editor.mouseDown(with: mouse(.leftMouseDown, p))
+            editor.mouseUp(with: mouse(.leftMouseUp, p))
+        }
+        func drag(_ a: NSPoint, _ b: NSPoint) {
+            editor.mouseDown(with: mouse(.leftMouseDown, a))
+            editor.mouseDragged(with: mouse(.leftMouseDragged, b))
+            editor.mouseUp(with: mouse(.leftMouseUp, b))
+        }
+        func escKey() -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                             timestamp: ProcessInfo.processInfo.systemUptime,
+                             windowNumber: win.windowNumber, context: nil,
+                             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                             isARepeat: false, keyCode: 53)!
+        }
+        func setField(_ text: String) {
+            if let tf = editor.subviews.compactMap({ $0 as? NSTextField }).last { tf.stringValue = text }
+        }
+
+        // Marker 1 with caption, marker 2 without.
+        editor.currentTool = .marker
+        click(NSPoint(x: 90, y: 90))
+        setField("第一步")
+        click(NSPoint(x: 190, y: 140))          // commits caption 1, stamps 2
+        editor.keyDown(with: escKey())          // commits empty caption
+
+        editor.currentTool = .arrow
+        drag(NSPoint(x: 250, y: 220), NSPoint(x: 420, y: 130))
+
+        editor.currentTool = .rect
+        drag(NSPoint(x: 60, y: 220), NSPoint(x: 200, y: 330))
+
+        // Mosaic over the colour blocks (right side).
+        editor.currentTool = .mosaic
+        drag(NSPoint(x: 400, y: 220), NSPoint(x: 560, y: 340))
+
+        // Text, committed with Esc, then dragged to a new position.
+        editor.currentTool = .text
+        click(NSPoint(x: 300, y: 60))
+        setField("拖动我")
+        editor.keyDown(with: escKey())
+        editor.mouseDown(with: mouse(.leftMouseDown, NSPoint(x: 315, y: 75)))   // grabs the text
+        editor.mouseDragged(with: mouse(.leftMouseDragged, NSPoint(x: 370, y: 180)))
+        editor.mouseUp(with: mouse(.leftMouseUp, NSPoint(x: 370, y: 180)))
+
+        // Clamp test: with a crop set, a drag past the edge stops at the crop.
+        // (Starts on empty canvas so it doesn't grab the mosaic for a move.)
+        editor.cropRect = NSRect(x: 20, y: 20, width: 580, height: 340)
+        editor.currentTool = .rect
+        drag(NSPoint(x: 300, y: 260), NSPoint(x: 700, y: 420))
+
+        editor.currentTool = nil
+
+        print("[toolbartest] shapes:", editor.shapes.map { "\($0.tool.rawValue) \(Int($0.rect.minX)),\(Int($0.rect.minY)) \(Int($0.rect.width))x\(Int($0.rect.height))" }.joined(separator: " | "))
+
+        // Export the flattened crop (what copy/save would produce) for inspection.
+        let flat = editor.flattenedImage()
+        if let tiff = flat.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: "/tmp/toolbar_export.png"))
+            print("[toolbartest] export -> /tmp/toolbar_export.png \(png.count / 1024)KB")
+        }
+
+        app.run()
+        exit(0)
+    }
+
+    static func runShotCursor() -> Never {
+        let cursor = ShotSelectionCursor.cursor
+        let image = cursor.image
+        guard image.size == NSSize(width: 30, height: 34),
+              cursor.hotSpot == NSPoint(x: 3, y: 3),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            print("[cursortest] FAIL: invalid cursor image or hotspot")
+            exit(1)
+        }
+        let url = URL(fileURLWithPath: "/tmp/irecord-selection-cursor.png")
+        do {
+            try png.write(to: url, options: .atomic)
+            print("[cursortest] PASS: arrow + badge cursor, hotspot=3,3, output=\(url.path)")
+            exit(0)
+        } catch {
+            print("[cursortest] FAIL: \(error.localizedDescription)")
+            exit(1)
+        }
+    }
+
     /// Deterministic synthetic page: horizontal bands filled with
     /// pseudo-random blocks — plenty of high-frequency detail for matching.
-    private static func syntheticPage(width: Int, height: Int) -> CGImage? {
-        guard let ctx = CGContext(data: nil, width: width, height: height,
+    private static func syntheticPage(width: Int, height: Int) -> CGImage? {        guard let ctx = CGContext(data: nil, width: width, height: height,
                                   bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)

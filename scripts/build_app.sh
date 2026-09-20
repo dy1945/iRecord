@@ -35,6 +35,8 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$EXEC" "$APP_DIR/Contents/MacOS/$APP_NAME"
+mkdir -p "$APP_DIR/Contents/Helpers"
+cp "$BIN_PATH/IRecordCLI" "$APP_DIR/Contents/Helpers/irecord"
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
@@ -43,14 +45,19 @@ if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 
-# Ad-hoc code signing. A stable signature keeps the TCC permission grant from
-# being reset on every rebuild (important so the user only approves once).
-echo "==> Code signing (ad-hoc)…"
-codesign --force --deep --sign - \
+# A persistent signing identity keeps the Screen Recording TCC grant stable
+# across upgrades. Ad-hoc remains a development fallback.
+SIGN_IDENTITY="${IRECORD_SIGN_IDENTITY:--}"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    echo "==> Code signing (ad-hoc; macOS may request Screen Recording again after rebuild)…"
+else
+    echo "==> Code signing with $SIGN_IDENTITY…"
+fi
+codesign --force --deep --sign "$SIGN_IDENTITY" \
     --identifier "$BUNDLE_ID" \
     --options runtime \
     "$APP_DIR" 2>/dev/null || \
-codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP_DIR"
+codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP_DIR"
 
 echo "==> Done: $APP_DIR"
 
