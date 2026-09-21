@@ -485,6 +485,38 @@ enum SelfTest {
         }
     }
 
+    static func runShotSelectionGeometry() -> Never {
+        let bounds = CGRect(x: 0, y: 0, width: 500, height: 400)
+        let rect = CGRect(x: 100, y: 80, width: 200, height: 160)
+        guard ShotSelectionGeometry.hitTest(CGPoint(x: 200, y: 160), in: rect) == .move,
+              ShotSelectionGeometry.hitTest(CGPoint(x: 100, y: 240), in: rect) == .resize(.northWest),
+              ShotSelectionGeometry.hitTest(CGPoint(x: 150, y: 240), in: rect) == .resize(.north),
+              ShotSelectionGeometry.hitTest(CGPoint(x: 300, y: 160), in: rect) == .resize(.east),
+              ShotSelectionGeometry.hitTest(CGPoint(x: 20, y: 20), in: rect) == .none else {
+            print("[selectiontest] FAIL: hit testing")
+            exit(1)
+        }
+        let moved = ShotSelectionGeometry.moved(rect, delta: CGPoint(x: 300, y: 300), within: bounds)
+        guard moved == CGRect(x: 300, y: 240, width: 200, height: 160) else {
+            print("[selectiontest] FAIL: move clamp \(moved)")
+            exit(2)
+        }
+        let resized = ShotSelectionGeometry.resized(rect, handle: .southWest,
+                                                    delta: CGPoint(x: -200, y: -200), within: bounds)
+        guard resized == CGRect(x: 0, y: 0, width: 300, height: 240) else {
+            print("[selectiontest] FAIL: resize clamp \(resized)")
+            exit(3)
+        }
+        let minimum = ShotSelectionGeometry.resized(rect, handle: .west,
+                                                    delta: CGPoint(x: 500, y: 0), within: bounds)
+        guard minimum.width == ShotSelectionGeometry.minimumSize else {
+            print("[selectiontest] FAIL: minimum size \(minimum)")
+            exit(4)
+        }
+        print("[selectiontest] PASS: center move, 8 handles, bounds clamp, minimum size")
+        exit(0)
+    }
+
     /// Deterministic synthetic page: horizontal bands filled with
     /// pseudo-random blocks — plenty of high-frequency detail for matching.
     private static func syntheticPage(width: Int, height: Int) -> CGImage? {        guard let ctx = CGContext(data: nil, width: width, height: height,

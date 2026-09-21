@@ -61,6 +61,10 @@ struct iRecordMain {
             SelfTest.runShotCursor()
         }
 
+        if CommandLine.arguments.contains("--selectiontest") {
+            SelfTest.runShotSelectionGeometry()
+        }
+
         // Headless annotation-toolbar check: `iRecord --toolbartest`
         // Renders the merged screenshot toolbar plus a canvas with stamped
         // markers / an arrow / a rect in a small floating window, then prints

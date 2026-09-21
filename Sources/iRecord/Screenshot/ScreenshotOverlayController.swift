@@ -41,6 +41,98 @@ enum ShotSelectionCursor {
         image.isTemplate = false
         return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 3))
     }()
+
+    private static func diagonal(_ symbol: String) -> NSCursor {
+        guard let source = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else {
+            return .crosshair
+        }
+        let size = NSSize(width: 20, height: 20)
+        let image = NSImage(size: size, flipped: false) { rect in
+            source.draw(in: rect.insetBy(dx: 1, dy: 1))
+            return true
+        }
+        return NSCursor(image: image, hotSpot: NSPoint(x: 10, y: 10))
+    }
+
+    static let resizeNorthWestSouthEast = diagonal("arrow.up.left.and.arrow.down.right")
+    static let resizeNorthEastSouthWest = diagonal("arrow.up.right.and.arrow.down.left")
+}
+
+enum ShotSelectionHandle: CaseIterable, Equatable {
+    case northWest, north, northEast, east, southEast, south, southWest, west
+}
+
+enum ShotSelectionHit: Equatable {
+    case none
+    case move
+    case resize(ShotSelectionHandle)
+}
+
+/// Pure selection geometry shared by mouse handling and the headless self-test.
+enum ShotSelectionGeometry {
+    static let hitSlop: CGFloat = 7
+    static let minimumSize: CGFloat = 8
+
+    static func handlePoint(_ handle: ShotSelectionHandle, in rect: CGRect) -> CGPoint {
+        switch handle {
+        case .northWest: return CGPoint(x: rect.minX, y: rect.maxY)
+        case .north: return CGPoint(x: rect.midX, y: rect.maxY)
+        case .northEast: return CGPoint(x: rect.maxX, y: rect.maxY)
+        case .east: return CGPoint(x: rect.maxX, y: rect.midY)
+        case .southEast: return CGPoint(x: rect.maxX, y: rect.minY)
+        case .south: return CGPoint(x: rect.midX, y: rect.minY)
+        case .southWest: return CGPoint(x: rect.minX, y: rect.minY)
+        case .west: return CGPoint(x: rect.minX, y: rect.midY)
+        }
+    }
+
+    static func hitTest(_ point: CGPoint, in rect: CGRect) -> ShotSelectionHit {
+        guard rect.insetBy(dx: -hitSlop, dy: -hitSlop).contains(point) else { return .none }
+        let corners: [ShotSelectionHandle] = [.northWest, .northEast, .southEast, .southWest]
+        for handle in corners {
+            let p = handlePoint(handle, in: rect)
+            if abs(point.x - p.x) <= hitSlop, abs(point.y - p.y) <= hitSlop {
+                return .resize(handle)
+            }
+        }
+        if point.x >= rect.minX - hitSlop, point.x <= rect.maxX + hitSlop {
+            if abs(point.y - rect.maxY) <= hitSlop { return .resize(.north) }
+            if abs(point.y - rect.minY) <= hitSlop { return .resize(.south) }
+        }
+        if point.y >= rect.minY - hitSlop, point.y <= rect.maxY + hitSlop {
+            if abs(point.x - rect.maxX) <= hitSlop { return .resize(.east) }
+            if abs(point.x - rect.minX) <= hitSlop { return .resize(.west) }
+        }
+        return rect.contains(point) ? .move : .none
+    }
+
+    static func moved(_ rect: CGRect, delta: CGPoint, within bounds: CGRect) -> CGRect {
+        var origin = CGPoint(x: rect.origin.x + delta.x, y: rect.origin.y + delta.y)
+        origin.x = max(bounds.minX, min(bounds.maxX - rect.width, origin.x))
+        origin.y = max(bounds.minY, min(bounds.maxY - rect.height, origin.y))
+        return CGRect(origin: origin, size: rect.size)
+    }
+
+    static func resized(_ rect: CGRect, handle: ShotSelectionHandle,
+                        delta: CGPoint, within bounds: CGRect) -> CGRect {
+        var minX = rect.minX, maxX = rect.maxX
+        var minY = rect.minY, maxY = rect.maxY
+        switch handle {
+        case .northWest, .west, .southWest:
+            minX = max(bounds.minX, min(rect.maxX - minimumSize, rect.minX + delta.x))
+        case .northEast, .east, .southEast:
+            maxX = min(bounds.maxX, max(rect.minX + minimumSize, rect.maxX + delta.x))
+        default: break
+        }
+        switch handle {
+        case .northWest, .north, .northEast:
+            maxY = min(bounds.maxY, max(rect.minY + minimumSize, rect.maxY + delta.y))
+        case .southWest, .south, .southEast:
+            minY = max(bounds.minY, min(rect.maxY - minimumSize, rect.minY + delta.y))
+        default: break
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
 }
 
 /// The entry-point flows for still screenshots.
@@ -302,6 +394,8 @@ private final class ShotOverlayView: NSView {
     private var candidateFrames: [CGRect] = []
 
     private var startPoint: CGPoint?
+    private var dragHit: ShotSelectionHit = .none
+    private var dragStartRect: CGRect = .zero
     private var dragging = false
     private var currentRect: CGRect = .zero
     private var hasSelection = false
@@ -338,6 +432,31 @@ private final class ShotOverlayView: NSView {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: ShotSelectionCursor.cursor)
+        guard locked, hasSelection else { return }
+        let inner = currentRect.insetBy(dx: ShotSelectionGeometry.hitSlop,
+                                        dy: ShotSelectionGeometry.hitSlop)
+        if !inner.isEmpty { addCursorRect(inner, cursor: .openHand) }
+        let slop = ShotSelectionGeometry.hitSlop
+        addCursorRect(CGRect(x: currentRect.minX + slop, y: currentRect.maxY - slop,
+                             width: max(0, currentRect.width - slop * 2), height: slop * 2),
+                      cursor: .resizeUpDown)
+        addCursorRect(CGRect(x: currentRect.minX + slop, y: currentRect.minY - slop,
+                             width: max(0, currentRect.width - slop * 2), height: slop * 2),
+                      cursor: .resizeUpDown)
+        addCursorRect(CGRect(x: currentRect.maxX - slop, y: currentRect.minY + slop,
+                             width: slop * 2, height: max(0, currentRect.height - slop * 2)),
+                      cursor: .resizeLeftRight)
+        addCursorRect(CGRect(x: currentRect.minX - slop, y: currentRect.minY + slop,
+                             width: slop * 2, height: max(0, currentRect.height - slop * 2)),
+                      cursor: .resizeLeftRight)
+        for handle in ShotSelectionHandle.allCases {
+            let p = ShotSelectionGeometry.handlePoint(handle, in: currentRect)
+            let hitRect = CGRect(x: p.x - ShotSelectionGeometry.hitSlop,
+                                 y: p.y - ShotSelectionGeometry.hitSlop,
+                                 width: ShotSelectionGeometry.hitSlop * 2,
+                                 height: ShotSelectionGeometry.hitSlop * 2)
+            addCursorRect(hitRect, cursor: cursor(for: .resize(handle)))
+        }
     }
 
     // MARK: Window auto-matching
@@ -391,7 +510,11 @@ private final class ShotOverlayView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         if let tb = toolbar, !tb.isHidden, tb.frame.contains(p) { return }
         mouse = clampedToBounds(p)
-        startPoint = p
+        startPoint = mouse
+        dragHit = (locked && hasSelection)
+            ? ShotSelectionGeometry.hitTest(mouse, in: currentRect)
+            : .none
+        dragStartRect = currentRect
         dragging = false
     }
 
@@ -404,12 +527,27 @@ private final class ShotOverlayView: NSView {
             dragging = true
             hoverActive = false
             locked = false
-            discardEditor()          // a fresh region means fresh annotations
+            if dragHit == .none {
+                discardEditor()      // a fresh region means fresh annotations
+            }
             toolbar?.isHidden = true
         }
         hasSelection = true
-        currentRect = CGRect(x: min(start.x, p.x), y: min(start.y, p.y),
-                             width: abs(p.x - start.x), height: abs(p.y - start.y))
+        let delta = CGPoint(x: p.x - start.x, y: p.y - start.y)
+        switch dragHit {
+        case .move:
+            currentRect = ShotSelectionGeometry.moved(dragStartRect, delta: delta, within: bounds)
+            NSCursor.closedHand.set()
+        case .resize(let handle):
+            currentRect = ShotSelectionGeometry.resized(dragStartRect, handle: handle,
+                                                        delta: delta, within: bounds)
+            cursor(for: dragHit).set()
+        case .none:
+            currentRect = CGRect(x: min(start.x, p.x), y: min(start.y, p.y),
+                                 width: abs(p.x - start.x), height: abs(p.y - start.y))
+        }
+        if let editorView { updateEditorCrop(for: editorView) }
+        window?.invalidateCursorRects(for: self)
         needsDisplay = true
     }
 
@@ -417,8 +555,10 @@ private final class ShotOverlayView: NSView {
         let p = clampedToBounds(convert(event.locationInWindow, from: nil))
         mouse = p
         let wasDragging = dragging
+        let completedHit = dragHit
         startPoint = nil
         dragging = false
+        dragHit = .none
         if event.clickCount >= 2 {
             confirm(scrollingMode ? .scrolling : .copy)
             return
@@ -427,8 +567,8 @@ private final class ShotOverlayView: NSView {
             // Bare click: inside an existing selection keeps it (so a following
             // double-click copies it); otherwise lock the window under the
             // cursor (when hover-framing is on); empty space clears.
-            hoverActive = true
-            if hasSelection, currentRect.contains(p) {
+            if completedHit != .none || (hasSelection && currentRect.contains(p)) {
+                hoverActive = false
                 locked = true
             } else if RecordingController.shared.hoverFramesWindows,
                       let hit = candidateFrames.first(where: { $0.contains(globalPoint(p)) }) {
@@ -444,14 +584,19 @@ private final class ShotOverlayView: NSView {
             locked = hasSelection && currentRect.width >= 8 && currentRect.height >= 8
         }
         layoutToolbar()
+        window?.invalidateCursorRects(for: self)
         needsDisplay = true
     }
 
     override func mouseMoved(with event: NSEvent) {
         mouse = clampedToBounds(convert(event.locationInWindow, from: nil))
+        if locked, hasSelection {
+            cursor(for: ShotSelectionGeometry.hitTest(mouse, in: currentRect)).set()
+        }
         // Hover window-framing can be turned off in Settings → 截图. Once the
         // annotation editor is attached the region stays put (iShot-style).
-        if editorView == nil, hoverActive, startPoint == nil, RecordingController.shared.hoverFramesWindows {
+        if editorView == nil, !locked, hoverActive, startPoint == nil,
+           RecordingController.shared.hoverFramesWindows {
             let g = globalPoint(mouse)
             if let hit = candidateFrames.first(where: { $0.contains(g) }) {
                 adoptAutoSelection(globalRect: hit, lock: false)
@@ -462,6 +607,17 @@ private final class ShotOverlayView: NSView {
             }
         }
         needsDisplay = true
+    }
+
+    private func cursor(for hit: ShotSelectionHit) -> NSCursor {
+        switch hit {
+        case .move: return .openHand
+        case .resize(.north), .resize(.south): return .resizeUpDown
+        case .resize(.east), .resize(.west): return .resizeLeftRight
+        case .resize(.northWest), .resize(.southEast): return ShotSelectionCursor.resizeNorthWestSouthEast
+        case .resize(.northEast), .resize(.southWest): return ShotSelectionCursor.resizeNorthEastSouthWest
+        case .none: return ShotSelectionCursor.cursor
+        }
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -631,6 +787,7 @@ private final class ShotOverlayView: NSView {
             let border = NSBezierPath(rect: currentRect)
             border.lineWidth = 1.5
             border.stroke()
+            if locked { drawSelectionHandles(for: currentRect) }
             drawDimensions(for: currentRect)
         } else {
             dim.setFill()
@@ -669,6 +826,19 @@ private final class ShotOverlayView: NSView {
         NSColor.black.withAlphaComponent(0.7).setFill()
         NSBezierPath(roundedRect: box, xRadius: 4, yRadius: 4).fill()
         (text as NSString).draw(at: NSPoint(x: box.minX + pad, y: box.minY + pad / 2), withAttributes: attrs)
+    }
+
+    private func drawSelectionHandles(for rect: CGRect) {
+        for handle in ShotSelectionHandle.allCases {
+            let point = ShotSelectionGeometry.handlePoint(handle, in: rect)
+            let knob = CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)
+            NSColor.systemBlue.setFill()
+            NSColor.white.setStroke()
+            let path = NSBezierPath(roundedRect: knob, xRadius: 1.5, yRadius: 1.5)
+            path.lineWidth = 1
+            path.fill()
+            path.stroke()
+        }
     }
 
     private func drawHint() {
