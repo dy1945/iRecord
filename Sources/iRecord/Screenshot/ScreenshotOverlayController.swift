@@ -399,6 +399,9 @@ private final class ShotOverlayView: NSView {
     private var dragging = false
     private var currentRect: CGRect = .zero
     private var hasSelection = false
+    /// Auto/hover selection is only a visual suggestion. Moving and resizing
+    /// become available after the user completes a click or drag and releases.
+    private var selectionCommitted = false
     /// While true the highlight follows the window under the cursor; a manual
     /// drag switches it off until the next bare click.
     private var hoverActive = true
@@ -432,7 +435,7 @@ private final class ShotOverlayView: NSView {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: ShotSelectionCursor.cursor)
-        guard locked, hasSelection else { return }
+        guard locked, hasSelection, selectionCommitted else { return }
         let inner = currentRect.insetBy(dx: ShotSelectionGeometry.hitSlop,
                                         dy: ShotSelectionGeometry.hitSlop)
         if !inner.isEmpty { addCursorRect(inner, cursor: ShotSelectionCursor.cursor) }
@@ -483,6 +486,7 @@ private final class ShotOverlayView: NSView {
         currentRect = local
         hasSelection = true
         locked = lock
+        selectionCommitted = false
         onClaimAutoSelection?(self)
         layoutToolbar()
         needsDisplay = true
@@ -494,6 +498,7 @@ private final class ShotOverlayView: NSView {
         guard hoverActive, hasSelection, startPoint == nil, editorView == nil else { return }
         hasSelection = false
         locked = false
+        selectionCommitted = false
         currentRect = .zero
         toolbar?.isHidden = true
         needsDisplay = true
@@ -511,7 +516,7 @@ private final class ShotOverlayView: NSView {
         if let tb = toolbar, !tb.isHidden, tb.frame.contains(p) { return }
         mouse = clampedToBounds(p)
         startPoint = mouse
-        dragHit = (locked && hasSelection)
+        dragHit = (locked && hasSelection && selectionCommitted)
             ? ShotSelectionGeometry.hitTest(mouse, in: currentRect)
             : .none
         dragStartRect = currentRect
@@ -529,6 +534,7 @@ private final class ShotOverlayView: NSView {
             hoverActive = false
             locked = false
             if dragHit == .none {
+                selectionCommitted = false
                 discardEditor()      // a fresh region means fresh annotations
             }
             toolbar?.isHidden = true
@@ -571,22 +577,26 @@ private final class ShotOverlayView: NSView {
             if completedHit != .none || (hasSelection && currentRect.contains(p)) {
                 hoverActive = false
                 locked = true
+                selectionCommitted = true
             } else if RecordingController.shared.hoverFramesWindows,
                       let hit = candidateFrames.first(where: { $0.contains(globalPoint(p)) }) {
                 discardEditor()
                 adoptAutoSelection(globalRect: hit, lock: true)
+                selectionCommitted = true
             } else {
                 hasSelection = false
                 locked = false
+                selectionCommitted = false
                 discardEditor()
                 onClaimAutoSelection?(self)
             }
         } else {
             locked = hasSelection && currentRect.width >= 8 && currentRect.height >= 8
+            selectionCommitted = locked
         }
         layoutToolbar()
         window?.invalidateCursorRects(for: self)
-        cursor(for: locked && hasSelection
+        cursor(for: locked && hasSelection && selectionCommitted
                ? ShotSelectionGeometry.hitTest(mouse, in: currentRect)
                : .none).set()
         needsDisplay = true
@@ -594,7 +604,7 @@ private final class ShotOverlayView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         mouse = clampedToBounds(convert(event.locationInWindow, from: nil))
-        if locked, hasSelection {
+        if locked, hasSelection, selectionCommitted {
             cursor(for: ShotSelectionGeometry.hitTest(mouse, in: currentRect)).set()
         }
         // Hover window-framing can be turned off in Settings → 截图. Once the
@@ -791,7 +801,7 @@ private final class ShotOverlayView: NSView {
             let border = NSBezierPath(rect: currentRect)
             border.lineWidth = 1.5
             border.stroke()
-            if locked { drawSelectionHandles(for: currentRect) }
+            if locked, selectionCommitted { drawSelectionHandles(for: currentRect) }
             drawDimensions(for: currentRect)
         } else {
             dim.setFill()
