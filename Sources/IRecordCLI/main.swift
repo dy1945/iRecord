@@ -4,24 +4,42 @@ import ControlProtocol
 import Darwin
 
 let usage = """
-iRecord command line (bundled with iRecord.app)
-  irecord status [--json]
-  irecord permission request [--json]
-  irecord windows list [--search TEXT] [--json]
-  irecord windows preview --window-id ID --output /absolute/window.png [--json]
-  irecord recording start --window-id ID [--json]
-  irecord recording pause|resume --session-id ID [--json]
-  irecord recording stop --session-id ID [--output /absolute/path.mp4]
-      [--crop-insets TOP,RIGHT,BOTTOM,LEFT] [--max-edge 1920]
-      [--overwrite] [--json]
-  irecord install [--json]       Install ~/.local/bin/irecord and zsh/bash PATH
-  irecord uninstall [--json]     Remove this CLI link and its PATH blocks
-  irecord --help
+iRecord CLI
 
-App starts automatically if needed. Recording uses the App's current audio,
-cursor and FPS settings. Screen permissions belong to iRecord.app.
-Errors exit 1 (operation) or 2 (usage). JSON is the only stdout with --json.
-A transport timeout does not cancel recording/export: query status before retrying.
+Usage:
+  irecord <command> [options]
+
+Commands:
+  status                         查看 App、权限和录制状态
+  permission                     请求屏幕录制权限
+  ls [--search TEXT]             查找可录制窗口
+  preview --window-id ID         预览目标窗口（需 --output PNG）
+  start --window-id ID           开始窗口录制
+  pause --session-id ID          暂停录制
+  resume --session-id ID         继续录制
+  stop --session-id ID           停止并导出
+  install                        安装 ~/.local/bin/irecord
+  uninstall                      移除 CLI，保留 App 和录屏
+
+Stop options:
+  --output PATH                  指定 MP4、MOV 或 GIF 输出路径
+  --crop-insets T,R,B,L          按原始像素裁剪上、右、下、左
+  --max-edge PIXELS              最长边，默认 1920；0 保留原尺寸
+  --overwrite                    允许覆盖已有文件
+
+Global options:
+  --json                         输出稳定 JSON，供 Agent 使用
+  -h, --help                     显示本菜单
+
+Examples:
+  irecord ls --search Chrome --json
+  irecord preview --window-id 311 --output /tmp/window.png --json
+  irecord start --window-id 311 --json
+  irecord pause --session-id SESSION --json
+  irecord resume --session-id SESSION --json
+  irecord stop --session-id SESSION --crop-insets 180,0,0,0 --json
+
+旧版多级命令仍兼容。App 会自动启动，并沿用 App 的声音、鼠标、帧率和保存目录设置。
 """
 let args = Array(CommandLine.arguments.dropFirst())
 let json = args.contains("--json")
@@ -36,7 +54,9 @@ func finish(_ reply: ControlReply, usageError: Bool = false) -> Never {
     } else { fputs("\(reply.code): \(reply.message)\n", stderr) }
     exit(reply.ok ? 0 : (usageError ? 2 : 1))
 }
-if args.isEmpty || args == ["--help"] || args == ["help"] { print(usage); exit(0) }
+if args.isEmpty || args.contains("-h") || args.contains("--help") || args == ["help"] {
+    print(usage); exit(0)
+}
 var words: [String] = []; var options: [String: String] = [:]; var i = 0
 while i < args.count {
     let arg = args[i]
@@ -49,13 +69,23 @@ while i < args.count {
     } else { words.append(arg) }
     i += 1
 }
-let command = words.joined(separator: " ")
+let enteredCommand = words.joined(separator: " ")
+let aliases = [
+    "permission": "permission request",
+    "ls": "windows list",
+    "preview": "windows preview",
+    "start": "recording start",
+    "pause": "recording pause",
+    "resume": "recording resume",
+    "stop": "recording stop"
+]
+let command = aliases[enteredCommand] ?? enteredCommand
 let allowed: [String: Set<String>] = ["status": [], "permission request": [], "windows list": ["search"],
     "windows preview": ["window-id", "output"], "recording start": ["window-id"],
     "recording stop": ["session-id", "output", "max-edge", "crop-insets", "overwrite"],
     "recording pause": ["session-id"], "recording resume": ["session-id"], "install": [], "uninstall": []]
 guard let keys = allowed[command], Set(options.keys).subtracting(["json"]).isSubset(of: keys) else {
-    finish(ControlReply("invalid_arguments", "Invalid command/options. Run irecord --help."), usageError: true)
+    finish(ControlReply("invalid_arguments", "Invalid command/options. Run irecord -h."), usageError: true)
 }
 let required: [String: [String]] = ["windows preview": ["window-id", "output"],
     "recording start": ["window-id"], "recording stop": ["session-id"],

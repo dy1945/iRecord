@@ -18,22 +18,24 @@ CLI 与 App 一起构建、签名和分发，路径为 `iRecord.app/Contents/Hel
 ```sh
 irecord status --json
 irecord permission request --json
-irecord windows list --search 'ego' --json
-irecord windows preview --window-id 123 --output /tmp/ego-window.png --json
-irecord recording start --window-id 123 --json
+irecord ls --search 'ego' --json
+irecord preview --window-id 123 --output /tmp/ego-window.png --json
+irecord start --window-id 123 --json
 # 从 values.session_id 读取会话 ID，然后操作浏览器。
-irecord recording pause --session-id SESSION --json
-irecord recording resume --session-id SESSION --json
-irecord recording stop --session-id SESSION --json
+irecord pause --session-id SESSION --json
+irecord resume --session-id SESSION --json
+irecord stop --session-id SESSION --json
 ```
 
 Agent 控制浏览器时，不建议切换浏览器全屏。先用窗口预览判断浏览器顶部栏的像素高度，停止时通过四边裁剪排除地址栏，同时保持浏览器窗口、窗口 ID 和自动化坐标稳定：
 
 ```bash
-irecord recording stop --session-id SESSION --crop-insets 180,0,0,0 --json
+irecord stop --session-id SESSION --crop-insets 180,0,0,0 --json
 ```
 
 `--crop-insets` 的顺序为 `上,右,下,左`，单位是原始录屏像素。它当前支持 MP4 和 MOV；导出仍会在裁剪后应用 `--max-edge`。
+
+运行 `irecord -h` 查看简洁的命令菜单。`ls / preview / start / pause / resume / stop / permission` 是推荐短命令；旧版 `windows list / windows preview / recording ... / permission request` 仍兼容。
 
 当前版本支持窗口录制，沿用 App 的声音、鼠标、输出帧率、格式和保存目录设置。未指定 `--output` 时，会在 App 的录制目录中自动生成不重复的文件名。默认将长边限制到 1920 像素并保持比例；可用 `--max-edge 1280` 调低，或用 `--max-edge 0` 保留原始像素。已有文件默认拒绝，显式 `--overwrite` 才原子替换。
 
