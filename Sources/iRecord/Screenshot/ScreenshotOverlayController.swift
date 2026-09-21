@@ -435,7 +435,7 @@ private final class ShotOverlayView: NSView {
         guard locked, hasSelection else { return }
         let inner = currentRect.insetBy(dx: ShotSelectionGeometry.hitSlop,
                                         dy: ShotSelectionGeometry.hitSlop)
-        if !inner.isEmpty { addCursorRect(inner, cursor: .openHand) }
+        if !inner.isEmpty { addCursorRect(inner, cursor: ShotSelectionCursor.cursor) }
         let slop = ShotSelectionGeometry.hitSlop
         addCursorRect(CGRect(x: currentRect.minX + slop, y: currentRect.maxY - slop,
                              width: max(0, currentRect.width - slop * 2), height: slop * 2),
@@ -516,6 +516,7 @@ private final class ShotOverlayView: NSView {
             : .none
         dragStartRect = currentRect
         dragging = false
+        if dragHit == .move { NSCursor.closedHand.set() }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -585,6 +586,9 @@ private final class ShotOverlayView: NSView {
         }
         layoutToolbar()
         window?.invalidateCursorRects(for: self)
+        cursor(for: locked && hasSelection
+               ? ShotSelectionGeometry.hitTest(mouse, in: currentRect)
+               : .none).set()
         needsDisplay = true
     }
 
@@ -611,7 +615,7 @@ private final class ShotOverlayView: NSView {
 
     private func cursor(for hit: ShotSelectionHit) -> NSCursor {
         switch hit {
-        case .move: return .openHand
+        case .move: return ShotSelectionCursor.cursor
         case .resize(.north), .resize(.south): return .resizeUpDown
         case .resize(.east), .resize(.west): return .resizeLeftRight
         case .resize(.northWest), .resize(.southEast): return ShotSelectionCursor.resizeNorthWestSouthEast
