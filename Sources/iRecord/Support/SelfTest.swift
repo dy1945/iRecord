@@ -513,7 +513,17 @@ enum SelfTest {
             print("[selectiontest] FAIL: minimum size \(minimum)")
             exit(4)
         }
-        print("[selectiontest] PASS: center move, 8 handles, bounds clamp, minimum size")
+        let editor = AnnotationEditorView(image: NSImage(size: bounds.size))
+        editor.frame = bounds
+        editor.cropRect = rect
+        editor.currentTool = .rect
+        guard editor.hitTest(CGPoint(x: 200, y: 160)) === editor,
+              editor.hitTest(CGPoint(x: 100, y: 160)) == nil,
+              editor.hitTest(CGPoint(x: 40, y: 40)) == nil else {
+            print("[selectiontest] FAIL: annotation event routing")
+            exit(5)
+        }
+        print("[selectiontest] PASS: center move, 8 handles, bounds clamp, minimum size, annotation event routing")
         exit(0)
     }
 

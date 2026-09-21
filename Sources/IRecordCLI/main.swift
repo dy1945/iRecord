@@ -24,6 +24,7 @@ Commands:
 Stop options:
   --output PATH                  指定 MP4、MOV 或 GIF 输出路径
   --crop-insets T,R,B,L          按原始像素裁剪上、右、下、左
+  --crop-points T,R,B,L          按窗口逻辑点裁剪（浏览器推荐）
   --max-edge PIXELS              最长边，默认 1920；0 保留原尺寸
   --overwrite                    允许覆盖已有文件
 
@@ -37,7 +38,7 @@ Examples:
   irecord start --window-id 311 --json
   irecord pause --session-id SESSION --json
   irecord resume --session-id SESSION --json
-  irecord stop --session-id SESSION --crop-insets 180,0,0,0 --json
+  irecord stop --session-id SESSION --crop-points 87,0,0,0 --json
 
 旧版多级命令仍兼容。App 会自动启动，并沿用 App 的声音、鼠标、帧率和保存目录设置。
 """
@@ -62,7 +63,7 @@ while i < args.count {
     let arg = args[i]
     if arg == "--json" || arg == "--overwrite" { options[String(arg.dropFirst(2))] = "true" }
     else if arg.hasPrefix("--") {
-        guard ["--search", "--window-id", "--session-id", "--output", "--max-edge", "--crop-insets"].contains(arg), i + 1 < args.count else {
+        guard ["--search", "--window-id", "--session-id", "--output", "--max-edge", "--crop-insets", "--crop-points"].contains(arg), i + 1 < args.count else {
             finish(ControlReply("invalid_arguments", "Unknown option or missing value: \(arg)"), usageError: true)
         }
         i += 1; options[String(arg.dropFirst(2))] = args[i]
@@ -82,7 +83,7 @@ let aliases = [
 let command = aliases[enteredCommand] ?? enteredCommand
 let allowed: [String: Set<String>] = ["status": [], "permission request": [], "windows list": ["search"],
     "windows preview": ["window-id", "output"], "recording start": ["window-id"],
-    "recording stop": ["session-id", "output", "max-edge", "crop-insets", "overwrite"],
+    "recording stop": ["session-id", "output", "max-edge", "crop-insets", "crop-points", "overwrite"],
     "recording pause": ["session-id"], "recording resume": ["session-id"], "install": [], "uninstall": []]
 guard let keys = allowed[command], Set(options.keys).subtracting(["json"]).isSubset(of: keys) else {
     finish(ControlReply("invalid_arguments", "Invalid command/options. Run irecord -h."), usageError: true)

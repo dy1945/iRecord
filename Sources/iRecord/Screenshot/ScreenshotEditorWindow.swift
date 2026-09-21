@@ -410,11 +410,17 @@ final class AnnotationEditorView: NSView {
         }
     }
 
-    /// No tool selected → clicks fall through to the view underneath (the
-    /// screenshot overlay keeps its re-select behaviour until the user picks
-    /// an annotation tool).
+    /// Annotation tools only own the interior of the selected screenshot.
+    /// Outside the crop and along its resize border, events fall through to
+    /// the selection overlay so the user can reframe and still reach its UI.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if currentTool == nil, textField == nil { return nil }
+        if textField != nil { return super.hitTest(point) }
+        guard currentTool != nil else { return nil }
+        if let cropRect {
+            let annotationInterior = cropRect.insetBy(dx: ShotSelectionGeometry.hitSlop,
+                                                      dy: ShotSelectionGeometry.hitSlop)
+            guard !annotationInterior.isEmpty, annotationInterior.contains(point) else { return nil }
+        }
         return super.hitTest(point)
     }
 

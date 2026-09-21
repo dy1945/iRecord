@@ -27,13 +27,24 @@ irecord resume --session-id SESSION --json
 irecord stop --session-id SESSION --json
 ```
 
-Agent 控制浏览器时，不建议切换浏览器全屏。先用窗口预览判断浏览器顶部栏的像素高度，停止时通过四边裁剪排除地址栏，同时保持浏览器窗口、窗口 ID 和自动化坐标稳定：
+Agent 控制浏览器时，不建议切换浏览器全屏。推荐从浏览器页面读取逻辑尺寸：
 
-```bash
-irecord stop --session-id SESSION --crop-insets 180,0,0,0 --json
+```js
+({
+  top: window.outerHeight - window.innerHeight,
+  right: 0,
+  bottom: 0,
+  left: 0
+})
 ```
 
-`--crop-insets` 的顺序为 `上,右,下,左`，单位是原始录屏像素。它当前支持 MP4 和 MOV；导出仍会在裁剪后应用 `--max-edge`。
+把 `top` 直接传给 `--crop-points`。CLI 会根据窗口点尺寸和实际录屏像素自动换算 Retina 比例，因此 Agent 不需要从预览图猜原始像素：
+
+```bash
+irecord stop --session-id SESSION --crop-points 87,0,0,0 --json
+```
+
+`--crop-points` 的顺序为 `上,右,下,左`，单位是窗口逻辑点，是浏览器录屏的推荐参数。返回值 `crop_insets_pixels` 会给出最终换算后的像素裁剪值。`--crop-insets` 仍保留，用于已知原始视频像素的场景。二者当前支持 MP4 和 MOV；导出会在裁剪后应用 `--max-edge`。
 
 运行 `irecord -h` 查看简洁的命令菜单。`ls / preview / start / pause / resume / stop / permission` 是推荐短命令；旧版 `windows list / windows preview / recording ... / permission request` 仍兼容。
 

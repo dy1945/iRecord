@@ -21,6 +21,11 @@ final class ControlProtocolTests: XCTestCase {
         XCTAssertNil(RecordingExportPolicy.CropInsets.parse("-1,0,0,0"))
         XCTAssertNil(RecordingExportPolicy.cropRect(CGSize(width: 100, height: 100),
                                                      insets: .init(top: 100, right: 0, bottom: 0, left: 0)))
+        XCTAssertEqual(RecordingExportPolicy.pixelInsets(
+            from: .init(top: 87, right: 0, bottom: 0, left: 0),
+            sourceSize: CGSize(width: 3350, height: 2158),
+            windowSize: CGSize(width: 1675, height: 1079)),
+            .init(top: 174, right: 0, bottom: 0, left: 0))
     }
 
     func testMultiChunkRequestAndReply() throws {

@@ -11,6 +11,7 @@ final class AutomationController {
     private let recorder = RecordingController.shared
     private var sessionID: String?
     private var source: URL?
+    private var captureWindowSizePoints: CGSize?
     private var busy = false
     private var ownsCapture = false
     func releaseCapture() { ownsCapture = false }
@@ -140,7 +141,7 @@ final class AutomationController {
                 return ControlReply("invalid_arguments", "--window-id must be an unsigned window ID.")
             }
             busy = true; defer { busy = false }
-            guard await ScreenInfo.windows().contains(where: { $0.id == id }) else {
+            guard let targetWindow = await ScreenInfo.windows().first(where: { $0.id == id }) else {
                 return ControlReply("window_not_found", "Refresh windows list and choose an on-screen window.")
             }
             guard !recorder.isRecording else { return ControlReply("already_recording", "A recording started in the App.") }
@@ -148,6 +149,7 @@ final class AutomationController {
                 return ControlReply("permission_required", "Enable microphone access in iRecord or turn microphone recording off.")
             }
             sessionID = UUID().uuidString; lastExport = nil; ownsCapture = true
+            captureWindowSizePoints = targetWindow.frame.size
             recorder.startRecording(target: .window(windowID: id), automation: true)
             let ready = await waitUntil({ self.recorder.state == .recording || self.recorder.lastErrorMessage != nil })
             if ready && recorder.state == .recording { return status() }
@@ -181,6 +183,10 @@ final class AutomationController {
             .flatMap { OutputFormat(rawValue: URL(fileURLWithPath: $0).pathExtension.lowercased()) }
             ?? recorder.outputFormat
         let cropInsets: RecordingExportPolicy.CropInsets?
+        let cropPoints: RecordingExportPolicy.CropInsets?
+        guard request.options["crop-insets"] == nil || request.options["crop-points"] == nil else {
+            return ControlReply("invalid_arguments", "Use either --crop-points or --crop-insets, not both.")
+        }
         if let raw = request.options["crop-insets"] {
             guard let parsed = RecordingExportPolicy.CropInsets.parse(raw) else {
                 return ControlReply("invalid_arguments", "--crop-insets must be four non-negative source-pixel values: top,right,bottom,left.")
@@ -189,8 +195,16 @@ final class AutomationController {
         } else {
             cropInsets = nil
         }
-        if cropInsets != nil && format == .gif {
-            return ControlReply("invalid_arguments", "--crop-insets currently supports MP4 and MOV output.")
+        if let raw = request.options["crop-points"] {
+            guard let parsed = RecordingExportPolicy.CropInsets.parse(raw) else {
+                return ControlReply("invalid_arguments", "--crop-points must be four non-negative point values: top,right,bottom,left.")
+            }
+            cropPoints = parsed
+        } else {
+            cropPoints = nil
+        }
+        if (cropInsets != nil || cropPoints != nil) && format == .gif {
+            return ControlReply("invalid_arguments", "Cropping currently supports MP4 and MOV output.")
         }
         let destination = explicitOutput.map { URL(fileURLWithPath: $0) }
             ?? uniqueDestination(directory: recorder.outputDirectory, format: format)
@@ -227,10 +241,22 @@ final class AutomationController {
             let preferred = try await track.load(.preferredTransform)
             let oriented = naturalSize.applying(preferred)
             let sourceSize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
+            let effectiveInsets: RecordingExportPolicy.CropInsets?
+            if let cropPoints {
+                guard let points = captureWindowSizePoints,
+                      let converted = RecordingExportPolicy.pixelInsets(from: cropPoints,
+                                                                        sourceSize: sourceSize,
+                                                                        windowSize: points) else {
+                    return ControlReply("invalid_arguments", "Missing source window size for --crop-points.")
+                }
+                effectiveInsets = converted
+            } else {
+                effectiveInsets = cropInsets
+            }
             let cropRect: CGRect?
-            if let cropInsets {
-                guard let rect = RecordingExportPolicy.cropRect(sourceSize, insets: cropInsets) else {
-                    return ControlReply("invalid_arguments", "--crop-insets leaves no usable video area.")
+            if let effectiveInsets {
+                guard let rect = RecordingExportPolicy.cropRect(sourceSize, insets: effectiveInsets) else {
+                    return ControlReply("invalid_arguments", "Crop values leave no usable video area.")
                 }
                 cropRect = rect
             } else {
@@ -251,9 +277,16 @@ final class AutomationController {
             let result = overwrite ? rename(stage.path, destination.path) : link(stage.path, destination.path)
             guard result == 0 else { throw ControlSocket.failure() }
             recorder.noteExported(destination)
-            let reply = ControlReply(values: ["state": "completed", "session_id": id, "output": output,
-                                               "duration_seconds": String(duration), "width": String(Int(size.width)), "height": String(Int(size.height))])
-            self.source = nil; lastExport = reply
+            var values = ["state": "completed", "session_id": id, "output": output,
+                          "duration_seconds": String(duration), "width": String(Int(size.width)), "height": String(Int(size.height))]
+            if let effectiveInsets {
+                values["crop_insets_pixels"] = [effectiveInsets.top, effectiveInsets.right,
+                                                 effectiveInsets.bottom, effectiveInsets.left]
+                    .map { String(Int($0.rounded())) }.joined(separator: ",")
+                values["crop_mode"] = cropPoints == nil ? "pixels" : "points"
+            }
+            let reply = ControlReply(values: values)
+            self.source = nil; captureWindowSizePoints = nil; lastExport = reply
             try? FileManager.default.removeItem(at: source)
             return reply
         } catch { return ControlReply("export_failed", error.localizedDescription, values: status().values) }

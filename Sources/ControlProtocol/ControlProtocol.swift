@@ -109,6 +109,16 @@ public enum RecordingExportPolicy {
         return CGRect(x: insets.left, y: insets.top, width: width, height: height)
     }
 
+    public static func pixelInsets(from points: CropInsets, sourceSize: CGSize,
+                                   windowSize: CGSize) -> CropInsets? {
+        guard sourceSize.width > 0, sourceSize.height > 0,
+              windowSize.width > 0, windowSize.height > 0 else { return nil }
+        return CropInsets(top: points.top * sourceSize.height / windowSize.height,
+                          right: points.right * sourceSize.width / windowSize.width,
+                          bottom: points.bottom * sourceSize.height / windowSize.height,
+                          left: points.left * sourceSize.width / windowSize.width)
+    }
+
     public static func fittedSize(_ size: CGSize, maxEdge: CGFloat) -> CGSize {
         guard maxEdge > 0, max(size.width, size.height) > maxEdge else {
             return even(size)

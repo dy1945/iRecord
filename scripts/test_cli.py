@@ -15,6 +15,7 @@ args = parser.parse_args()
 help_result = subprocess.run([args.cli, '-h'], capture_output=True, text=True, timeout=10)
 assert help_result.returncode == 0
 assert 'Commands:' in help_result.stdout and 'irecord start' in help_result.stdout
+assert '--crop-points' in help_result.stdout
 
 def run(*words, code='ok', exit_code=None):
     p = subprocess.run([args.cli, *words, '--json'], capture_output=True, text=True, timeout=310)
@@ -57,7 +58,8 @@ with tempfile.TemporaryDirectory(prefix='irecord-cli-test-') as directory:
     output.write_bytes(b'preserve existing file')
     run('stop', '--session-id', sid, '--output', str(output), code='output_exists')
     assert output.read_bytes() == b'preserve existing file'
-    completed = run('stop', '--session-id', sid, '--output', str(output), '--overwrite')['values']
+    completed = run('stop', '--session-id', sid, '--output', str(output),
+                    '--crop-points', '0,0,0,0', '--overwrite')['values']
     assert completed['state'] == 'completed'
     assert float(completed['duration_seconds']) > 0
     assert int(completed['width']) > 0 and int(completed['height']) > 0
