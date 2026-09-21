@@ -521,7 +521,6 @@ private final class ShotOverlayView: NSView {
             : .none
         dragStartRect = currentRect
         dragging = false
-        if dragHit == .move { NSCursor.closedHand.set() }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -544,7 +543,7 @@ private final class ShotOverlayView: NSView {
         switch dragHit {
         case .move:
             currentRect = ShotSelectionGeometry.moved(dragStartRect, delta: delta, within: bounds)
-            NSCursor.closedHand.set()
+            ShotSelectionCursor.cursor.set()
         case .resize(let handle):
             currentRect = ShotSelectionGeometry.resized(dragStartRect, handle: handle,
                                                         delta: delta, within: bounds)
