@@ -523,6 +523,21 @@ enum SelfTest {
             print("[selectiontest] FAIL: annotation event routing")
             exit(5)
         }
+        // hitTest receives its point in the parent (bottom-left) coordinates,
+        // while the editor and cropRect use flipped (top-left) coordinates.
+        let parent = NSView(frame: bounds)
+        let offCenterEditor = AnnotationEditorView(image: NSImage(size: bounds.size))
+        offCenterEditor.frame = bounds
+        offCenterEditor.cropRect = CGRect(x: 100, y: 280, width: 200, height: 80)
+        parent.addSubview(offCenterEditor)
+        for tool in [ShapeTool.rect, .arrow] {
+            offCenterEditor.currentTool = tool
+            guard offCenterEditor.hitTest(CGPoint(x: 150, y: 80)) === offCenterEditor,
+                  offCenterEditor.hitTest(CGPoint(x: 150, y: 320)) == nil else {
+                print("[selectiontest] FAIL: flipped \(tool) annotation crop hit testing")
+                exit(12)
+            }
+        }
         var recording = RecordingAreaSelection(rect: rect, hasSelection: true)
         recording.press(at: CGPoint(x: 200, y: 160))
         recording.release()

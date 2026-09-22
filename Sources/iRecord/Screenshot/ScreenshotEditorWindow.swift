@@ -419,7 +419,10 @@ final class AnnotationEditorView: NSView {
         if let cropRect {
             let annotationInterior = cropRect.insetBy(dx: ShotSelectionGeometry.hitSlop,
                                                       dy: ShotSelectionGeometry.hitSlop)
-            guard !annotationInterior.isEmpty, annotationInterior.contains(point) else { return nil }
+            // NSView passes hitTest points in the superview's coordinates.
+            // This editor is flipped, so compare in its own coordinates.
+            let localPoint = superview.map { convert(point, from: $0) } ?? point
+            guard !annotationInterior.isEmpty, annotationInterior.contains(localPoint) else { return nil }
         }
         return super.hitTest(point)
     }
