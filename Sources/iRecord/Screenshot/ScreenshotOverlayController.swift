@@ -42,6 +42,47 @@ enum ShotSelectionCursor {
         return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 3))
     }()
 
+    /// Outside a locked crop: keep the same visible arrow, with a prohibition
+    /// badge below it to distinguish the double-click-to-cancel area.
+    static let outsideCursor: NSCursor = {
+        let image = NSImage(size: NSSize(width: 30, height: 48), flipped: false) { _ in
+            let arrow = NSBezierPath()
+            arrow.move(to: NSPoint(x: 3, y: 45))
+            arrow.line(to: NSPoint(x: 3, y: 22))
+            arrow.line(to: NSPoint(x: 9, y: 27))
+            arrow.line(to: NSPoint(x: 13, y: 18))
+            arrow.line(to: NSPoint(x: 17, y: 20))
+            arrow.line(to: NSPoint(x: 13, y: 29))
+            arrow.line(to: NSPoint(x: 21, y: 29))
+            arrow.close()
+            NSColor.black.withAlphaComponent(0.9).setStroke()
+            arrow.lineWidth = 3
+            arrow.lineJoinStyle = .round
+            arrow.stroke()
+            NSColor.white.setFill()
+            arrow.fill()
+
+            let badge = NSRect(x: 8, y: 2, width: 14, height: 14)
+            NSColor.black.withAlphaComponent(0.9).setFill()
+            NSBezierPath(ovalIn: badge.insetBy(dx: -2, dy: -2)).fill()
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: badge).fill()
+            NSColor.systemRed.setStroke()
+            let ring = NSBezierPath(ovalIn: badge.insetBy(dx: 1, dy: 1))
+            ring.lineWidth = 2.5
+            ring.stroke()
+            let slash = NSBezierPath()
+            slash.lineWidth = 2.5
+            slash.lineCapStyle = .round
+            slash.move(to: NSPoint(x: badge.minX + 3, y: badge.maxY - 3))
+            slash.line(to: NSPoint(x: badge.maxX - 3, y: badge.minY + 3))
+            slash.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 3))
+    }()
+
     private static func diagonal(_ symbol: String) -> NSCursor {
         guard let source = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else {
             return .crosshair
@@ -228,6 +269,14 @@ final class ScreenshotOverlayController {
             win.shotView.onClaimAutoSelection = { [weak self] view in
                 self?.clearAutoSelections(except: view)
             }
+            win.shotView.hasSelectionInSession = { [weak self] in
+                self?.windows.contains { ($0 as? ShotOverlayWindow)?.shotView.hasLockedSelection == true } ?? false
+            }
+            win.shotView.onSelectionStateChanged = { [weak self] in
+                for case let window as ShotOverlayWindow in self?.windows ?? [] {
+                    window.shotView.invalidateSelectionCursors()
+                }
+            }
             win.makeKeyAndOrderFront(nil)
             windows.append(win)
         }
@@ -387,6 +436,9 @@ final class ShotOverlayView: NSView {
     var onAction: ((CGRect, ShotAction) -> Void)?
     var onEditedAction: ((NSImage, ShotAction) -> Void)?
     var onClaimAutoSelection: ((ShotOverlayView) -> Void)?
+    var hasSelectionInSession: (() -> Bool)?
+    var onSelectionStateChanged: (() -> Void)?
+    var hasLockedSelection: Bool { locked && hasSelection }
 
     private let frozen: ScreenshotCapture.FrozenDisplay
     private let scrollingMode: Bool
@@ -434,11 +486,18 @@ final class ShotOverlayView: NSView {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: ShotSelectionCursor.cursor)
-        guard locked, hasSelection, selectionCommitted else { return }
-        let inner = currentRect.insetBy(dx: ShotSelectionGeometry.hitSlop,
-                                        dy: ShotSelectionGeometry.hitSlop)
-        if !inner.isEmpty { addCursorRect(inner, cursor: ShotSelectionCursor.cursor) }
+        guard locked, hasSelection else {
+            addCursorRect(bounds, cursor: hasSelectionInSession?() == true
+                          ? ShotSelectionCursor.outsideCursor : ShotSelectionCursor.cursor)
+            return
+        }
+        addCursorRect(bounds, cursor: ShotSelectionCursor.outsideCursor)
+        // The resize hit area belongs to the crop, including the few pixels
+        // outside its visible border. It must not advertise an exit gesture.
+        addCursorRect(currentRect.insetBy(dx: -ShotSelectionGeometry.hitSlop,
+                                         dy: -ShotSelectionGeometry.hitSlop).intersection(bounds),
+                      cursor: ShotSelectionCursor.cursor)
+        guard selectionCommitted else { return }
         let slop = ShotSelectionGeometry.hitSlop
         addCursorRect(CGRect(x: currentRect.minX + slop, y: currentRect.maxY - slop,
                              width: max(0, currentRect.width - slop * 2), height: slop * 2),
@@ -489,6 +548,8 @@ final class ShotOverlayView: NSView {
         selectionCommitted = false
         onClaimAutoSelection?(self)
         layoutToolbar()
+        invalidateSelectionCursors()
+        onSelectionStateChanged?()
         needsDisplay = true
     }
 
@@ -501,6 +562,8 @@ final class ShotOverlayView: NSView {
         selectionCommitted = false
         currentRect = .zero
         toolbar?.isHidden = true
+        invalidateSelectionCursors()
+        onSelectionStateChanged?()
         needsDisplay = true
     }
 
@@ -542,6 +605,7 @@ final class ShotOverlayView: NSView {
                 discardEditor()      // a fresh region means fresh annotations
             }
             toolbar?.isHidden = true
+            onSelectionStateChanged?()
         }
         hasSelection = true
         let delta = CGPoint(x: p.x - start.x, y: p.y - start.y)
@@ -567,13 +631,23 @@ final class ShotOverlayView: NSView {
         mouse = p
         let wasDragging = dragging
         let completedHit = dragHit
+        let pressedOutside = startPoint.map { isOutsideSelection(at: $0) } ?? false
         startPoint = nil
         dragging = false
         dragHit = .none
+        if !wasDragging, event.clickCount >= 2, pressedOutside, isOutsideSelection(at: p) {
+            onAction?(.zero, .cancel)
+            return
+        }
+        if !wasDragging, !hasLockedSelection, isOutsideSelection(at: p) {
+            // A selection on another display stays active after this click.
+            cursor(at: p).set()
+            return
+        }
         if !wasDragging {
             // Once editing starts, bare clicks anywhere keep that selection.
-            // Reselection requires a deliberate drag; canvas double-clicks
-            // are ordinary clicks, never an implicit finish action.
+            // Reselection requires a deliberate drag; only a double-click on
+            // the outside backdrop cancels, never one on the crop or controls.
             if (locked && hasSelection) || completedHit != .none || (hasSelection && currentRect.contains(p)) {
                 hoverActive = false
                 locked = true
@@ -595,21 +669,22 @@ final class ShotOverlayView: NSView {
             selectionCommitted = locked
         }
         layoutToolbar()
-        window?.invalidateCursorRects(for: self)
-        cursor(for: locked && hasSelection && selectionCommitted
-               ? ShotSelectionGeometry.hitTest(mouse, in: currentRect)
-               : .none).set()
+        invalidateSelectionCursors()
+        onSelectionStateChanged?()
+        cursor(at: mouse).set()
         needsDisplay = true
     }
 
     override func mouseMoved(with event: NSEvent) {
         mouse = clampedToBounds(convert(event.locationInWindow, from: nil))
-        if locked, hasSelection, selectionCommitted {
-            cursor(for: ShotSelectionGeometry.hitTest(mouse, in: currentRect)).set()
+        // Let the editor's own cursor regions handle tools and editable text.
+        if editorView?.hitTest(mouse) == nil {
+            cursor(at: mouse).set()
         }
         // Hover window-framing can be turned off in Settings → 截图. Once the
         // annotation editor is attached the region stays put (iShot-style).
         if editorView == nil, !locked, hoverActive, startPoint == nil,
+           hasSelectionInSession?() != true,
            RecordingController.shared.hoverFramesWindows {
             let g = globalPoint(mouse)
             if let hit = candidateFrames.first(where: { $0.contains(g) }) {
@@ -632,6 +707,27 @@ final class ShotOverlayView: NSView {
         case .resize(.northEast), .resize(.southWest): return ShotSelectionCursor.resizeNorthEastSouthWest
         case .none: return ShotSelectionCursor.cursor
         }
+    }
+
+    private func isOutsideSelection(at point: CGPoint) -> Bool {
+        guard hasLockedSelection || hasSelectionInSession?() == true else { return false }
+        if let toolbar, !toolbar.isHidden, toolbar.frame.contains(point) { return false }
+        guard hasLockedSelection else { return true }
+        return ShotSelectionGeometry.hitTest(point, in: currentRect) == .none
+    }
+
+    func invalidateSelectionCursors() {
+        window?.invalidateCursorRects(for: self)
+        if let editorView { window?.invalidateCursorRects(for: editorView) }
+    }
+
+    func cursor(at point: CGPoint) -> NSCursor {
+        if let toolbar, !toolbar.isHidden, toolbar.frame.contains(point) { return .arrow }
+        if isOutsideSelection(at: point) { return ShotSelectionCursor.outsideCursor }
+        guard locked, hasSelection else { return ShotSelectionCursor.cursor }
+        let hit = ShotSelectionGeometry.hitTest(point, in: currentRect)
+        if hit == .move, editorView?.currentTool != nil { return .crosshair }
+        return selectionCommitted ? cursor(for: hit) : ShotSelectionCursor.cursor
     }
 
     override func rightMouseDown(with event: NSEvent) {

@@ -367,7 +367,7 @@ final class AnnotationEditorView: NSView {
     var drawsBaseImage = true
     /// When set (view coords, top-left origin), `flattenedImage()` renders just
     /// this region — the overlay uses it to export the selection only.
-    var cropRect: CGRect?
+    var cropRect: CGRect? { didSet { window?.invalidateCursorRects(for: self) } }
 
     private(set) var shapes: [Shape] = [] { didSet { if movingIndex == nil { window?.invalidateCursorRects(for: self) } } }
     private var draft: Shape?
@@ -398,14 +398,18 @@ final class AnnotationEditorView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .crosshair)
         guard currentTool != nil else { return }
+        // The transparent overlay canvas spans the display, but only owns the
+        // crop interior. Leave the backdrop and resize cursors to its parent.
+        let interior = (cropRect?.insetBy(dx: ShotSelectionGeometry.hitSlop,
+                                         dy: ShotSelectionGeometry.hitSlop) ?? bounds).intersection(bounds)
+        if !interior.isEmpty { addCursorRect(interior, cursor: .crosshair) }
         for shape in shapes where shape.tool == .text {
             let size = (shape.text as NSString).size(withAttributes: [
                 .font: NSFont.systemFont(ofSize: shape.fontSize, weight: .medium)
             ])
             let rect = CGRect(origin: shape.start, size: size).insetBy(dx: -6, dy: -6)
-                .intersection(cropRect ?? bounds)
+                .intersection(interior)
             if !rect.isEmpty { addCursorRect(rect, cursor: .openHand) }
         }
     }
@@ -414,7 +418,9 @@ final class AnnotationEditorView: NSView {
     /// Outside the crop and along its resize border, events fall through to
     /// the selection overlay so the user can reframe and still reach its UI.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if textField != nil { return super.hitTest(point) }
+        // An active text field must not make the full-screen canvas consume
+        // clicks on the outside backdrop or the crop's resize border.
+        if textField != nil, let target = super.hitTest(point), target !== self { return target }
         guard currentTool != nil else { return nil }
         if let cropRect {
             let annotationInterior = cropRect.insetBy(dx: ShotSelectionGeometry.hitSlop,

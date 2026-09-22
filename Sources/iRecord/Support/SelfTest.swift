@@ -464,20 +464,22 @@ enum SelfTest {
     }
 
     static func runShotCursor() -> Never {
-        let cursor = ShotSelectionCursor.cursor
-        let image = cursor.image
-        guard image.size == NSSize(width: 30, height: 34),
-              cursor.hotSpot == NSPoint(x: 3, y: 3),
-              let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let png = bitmap.representation(using: .png, properties: [:]) else {
-            print("[cursortest] FAIL: invalid cursor image or hotspot")
-            exit(1)
-        }
-        let url = URL(fileURLWithPath: "/tmp/irecord-selection-cursor.png")
         do {
-            try png.write(to: url, options: .atomic)
-            print("[cursortest] PASS: arrow + badge cursor, hotspot=3,3, output=\(url.path)")
+            for (name, cursor) in [("selection", ShotSelectionCursor.cursor),
+                                   ("outside", ShotSelectionCursor.outsideCursor)] {
+                let image = cursor.image
+                guard image.size.width >= 30, image.size.height >= 34,
+                      cursor.hotSpot == NSPoint(x: 3, y: 3),
+                      let tiff = image.tiffRepresentation,
+                      let bitmap = NSBitmapImageRep(data: tiff),
+                      let png = bitmap.representation(using: .png, properties: [:]) else {
+                    print("[cursortest] FAIL: invalid \(name) cursor image or hotspot")
+                    exit(1)
+                }
+                let url = URL(fileURLWithPath: "/tmp/irecord-\(name)-cursor.png")
+                try png.write(to: url, options: .atomic)
+                print("[cursortest] PASS: \(name) cursor, hotspot=3,3, output=\(url.path)")
+            }
             exit(0)
         } catch {
             print("[cursortest] FAIL: \(error.localizedDescription)")
@@ -587,7 +589,7 @@ enum SelfTest {
             exit(11)
         }
         verifyPersistentShotSelection()
-        print("[selectiontest] PASS: screenshot geometry, persistent screenshot interaction, recording move/resize/redraw, configured directory export")
+        print("[selectiontest] PASS: screenshot geometry, outside double-click exit and cursors, persistent editing, recording move/resize/redraw, configured directory export")
         exit(0)
     }
 
@@ -621,11 +623,15 @@ enum SelfTest {
                 target.mouseDown(with: event(.leftMouseDown, point, clicks: clicks))
                 target.mouseUp(with: event(.leftMouseUp, point, clicks: clicks))
             }
-            func drag(_ start: CGPoint, to end: CGPoint) {
+            func drag(_ start: CGPoint, to end: CGPoint, clicks: Int = 1) {
                 let target = view.hitTest(start) ?? view
-                target.mouseDown(with: event(.leftMouseDown, start))
-                target.mouseDragged(with: event(.leftMouseDragged, end))
-                target.mouseUp(with: event(.leftMouseUp, end))
+                target.mouseDown(with: event(.leftMouseDown, start, clicks: clicks))
+                target.mouseDragged(with: event(.leftMouseDragged, end, clicks: clicks))
+                target.mouseUp(with: event(.leftMouseUp, end, clicks: clicks))
+            }
+            guard view.cursor(at: CGPoint(x: 50, y: 700)) === ShotSelectionCursor.cursor else {
+                print("[selectiontest] FAIL: initial selection must retain the selection cursor")
+                exit(21)
             }
             if autoSelection {
                 view.adoptAutoSelection(globalRect: CGRect(x: 200, y: 200, width: 400, height: 300), lock: true)
@@ -638,10 +644,39 @@ enum SelfTest {
                 print("[selectiontest] FAIL: selection did not enter editing")
                 exit(14)
             }
+            let outsidePoint = CGPoint(x: 50, y: 700)
+            let insidePoint = CGPoint(x: 400, y: 350)
+            // This point is geometrically outside the crop, but remains an
+            // interactive resize edge rather than an outside cancel target.
+            let edgePoint = CGPoint(x: 200 - ShotSelectionGeometry.hitSlop + 1, y: 350)
+            let toolbarPoint = CGPoint(x: toolbar.frame.midX, y: toolbar.frame.midY)
+            let initialEdgeCursor = autoSelection ? ShotSelectionCursor.cursor : NSCursor.resizeLeftRight
+            guard view.cursor(at: outsidePoint) === ShotSelectionCursor.outsideCursor,
+                  view.cursor(at: insidePoint) === ShotSelectionCursor.cursor,
+                  view.cursor(at: edgePoint) == initialEdgeCursor,
+                  view.cursor(at: toolbarPoint) == NSCursor.arrow else {
+                print("[selectiontest] FAIL: selected region cursor routing (scrolling=\(scrolling), autoSelection=\(autoSelection))")
+                exit(22)
+            }
+            if autoSelection {
+                // Auto-selection already displays the editing toolbar; users
+                // must be able to leave before their first confirmation click.
+                click(outsidePoint, clicks: 2)
+                guard actions.count == 1, actions.first == .cancel else {
+                    print("[selectiontest] FAIL: outside double-click must cancel an uncommitted auto-selection")
+                    exit(26)
+                }
+                actions.removeAll()
+            }
             let editor = view.subviews.compactMap { $0 as? AnnotationEditorView }.first
             let originalCrop = editor?.cropRect
             if let editor {
                 editor.currentTool = .rect
+                guard view.cursor(at: insidePoint) == NSCursor.crosshair,
+                      view.cursor(at: outsidePoint) === ShotSelectionCursor.outsideCursor else {
+                    print("[selectiontest] FAIL: annotation tool must preserve outside cursor and interior drawing cursor")
+                    exit(24)
+                }
                 drag(CGPoint(x: 250, y: 300), to: CGPoint(x: 330, y: 340))
                 editor.currentTool = .arrow
                 drag(CGPoint(x: 400, y: 420), to: CGPoint(x: 500, y: 460))
@@ -650,8 +685,8 @@ enum SelfTest {
                     exit(18)
                 }
             }
-            click(CGPoint(x: 50, y: 700))
-            drag(CGPoint(x: 50, y: 700), to: CGPoint(x: 55, y: 705))
+            click(outsidePoint)
+            drag(outsidePoint, to: CGPoint(x: 55, y: 705))
             guard toolbar.superview === view, !toolbar.isHidden,
                   scrolling || (editor?.superview === view && editor?.cropRect == originalCrop),
                   scrolling || editor?.shapes.count == 2,
@@ -659,21 +694,53 @@ enum SelfTest {
                 print("[selectiontest] FAIL: blank click discarded screenshot editing (scrolling=\(scrolling), autoSelection=\(autoSelection))")
                 exit(15)
             }
-            click(CGPoint(x: 50, y: 700), clicks: 2)
+            guard view.cursor(at: edgePoint) == NSCursor.resizeLeftRight else {
+                print("[selectiontest] FAIL: committed selection must expose resize cursor")
+                exit(25)
+            }
             editor?.currentTool = nil
-            click(CGPoint(x: 400, y: 350), clicks: 2)
-            view.rightMouseDown(with: event(.rightMouseDown, CGPoint(x: 50, y: 700)))
+            click(insidePoint, clicks: 2)
+            click(edgePoint, clicks: 2)
+            view.mouseDown(with: event(.leftMouseDown, insidePoint, clicks: 2))
+            view.mouseUp(with: event(.leftMouseUp, outsidePoint, clicks: 2))
+            view.rightMouseDown(with: event(.rightMouseDown, outsidePoint))
             guard actions.isEmpty, toolbar.superview === view, !toolbar.isHidden else {
-                print("[selectiontest] FAIL: canvas click finished or cancelled screenshot (scrolling=\(scrolling))")
+                print("[selectiontest] FAIL: interior/resize-edge double-click or right-click finished or cancelled screenshot (scrolling=\(scrolling))")
                 exit(16)
             }
             // A deliberate new selection still works after the ignored clicks.
-            drag(CGPoint(x: 650, y: 550), to: CGPoint(x: 900, y: 720))
+            drag(CGPoint(x: 650, y: 550), to: CGPoint(x: 900, y: 720), clicks: 2)
             let newEditor = view.subviews.compactMap { $0 as? AnnotationEditorView }.first
             guard scrolling || (newEditor !== editor && newEditor?.cropRect == CGRect(x: 650, y: 80, width: 250, height: 170)),
                   actions.isEmpty else {
                 print("[selectiontest] FAIL: deliberate reselection must remain available")
                 exit(19)
+            }
+            if let newEditor {
+                newEditor.currentTool = .text
+                click(CGPoint(x: 700, y: 640))
+                guard let textField = newEditor.subviews.compactMap({ $0 as? NSTextField }).first else {
+                    print("[selectiontest] FAIL: text gesture must begin an inline input field")
+                    exit(29)
+                }
+                textField.stringValue = "文字输入回归"
+                let fieldPoint = textField.convert(CGPoint(x: textField.bounds.midX,
+                                                            y: textField.bounds.midY), to: view)
+                let fieldTarget = view.hitTest(fieldPoint)
+                guard fieldTarget === textField || fieldTarget?.isDescendant(of: textField) == true else {
+                    print("[selectiontest] FAIL: inline text field must remain clickable")
+                    exit(30)
+                }
+                guard newEditor.hitTest(outsidePoint) == nil, view.hitTest(outsidePoint) === view else {
+                    print("[selectiontest] FAIL: active inline text field swallowed an outside click")
+                    exit(31)
+                }
+                click(outsidePoint, clicks: 2)
+                guard actions.count == 1, actions.first == .cancel else {
+                    print("[selectiontest] FAIL: outside double-click must cancel during inline text editing")
+                    exit(32)
+                }
+                actions.removeAll()
             }
             let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                          windowNumber: window.windowNumber, context: nil, characters: "\r",
@@ -682,6 +749,12 @@ enum SelfTest {
             guard actions.count == 1, actions.first == (scrolling ? .scrolling : .copy) else {
                 print("[selectiontest] FAIL: explicit completion must remain available")
                 exit(20)
+            }
+            actions.removeAll()
+            click(outsidePoint, clicks: 2)
+            guard actions.count == 1, actions.first == .cancel else {
+                print("[selectiontest] FAIL: outside double-click must cancel exactly once (scrolling=\(scrolling), autoSelection=\(autoSelection))")
+                exit(23)
             }
             actions.removeAll()
             let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
@@ -694,6 +767,40 @@ enum SelfTest {
             }
             window.close()
         }
+
+        // A second display has no local crop, but it is still outside the
+        // screenshot selected on the first display and follows the same rules.
+        let otherDisplay = ShotOverlayView(frozen: frozen, scrolling: false)
+        let otherWindow = NSWindow(contentRect: bounds, styleMask: .borderless,
+                                   backing: .buffered, defer: false)
+        otherWindow.isReleasedWhenClosed = false
+        otherDisplay.frame = bounds
+        otherWindow.contentView = otherDisplay
+        otherDisplay.hasSelectionInSession = { true }
+        var otherActions: [ShotAction] = []
+        otherDisplay.onAction = { _, action in otherActions.append(action) }
+        let blank = CGPoint(x: 50, y: 700)
+        guard !otherDisplay.hasLockedSelection,
+              otherDisplay.cursor(at: blank) === ShotSelectionCursor.outsideCursor else {
+            print("[selectiontest] FAIL: other display must show outside cursor for the session selection")
+            exit(27)
+        }
+        for clicks in [1, 2] {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(with: type, location: blank, modifierFlags: [],
+                                               timestamp: 0, windowNumber: otherWindow.windowNumber,
+                                               context: nil, eventNumber: 0, clickCount: clicks,
+                                               pressure: 1)!
+                if type == .leftMouseDown { otherDisplay.mouseDown(with: event) }
+                else { otherDisplay.mouseUp(with: event) }
+            }
+            guard otherActions == (clicks == 1 ? [] : [.cancel]),
+                  otherDisplay.cursor(at: blank) === ShotSelectionCursor.outsideCursor else {
+                print("[selectiontest] FAIL: other display blank click must preserve, double-click must cancel")
+                exit(28)
+            }
+        }
+        otherWindow.close()
     }
 
     /// Deterministic synthetic page: horizontal bands filled with
