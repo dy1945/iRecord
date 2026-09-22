@@ -60,29 +60,10 @@ final class AppCoordinator: NSObject {
         }
     }
 
-    /// Pops up a list of capturable windows (used by the area picker's window
-    /// button). Selecting one starts a window recording.
+    /// The area picker's window button uses the same searchable window picker
+    /// as the menu-bar panel and the window-recording shortcut.
     func presentWindowPickerMenu() {
-        Task {
-            let windows = await self.fetchWindows()
-            let menu = NSMenu()
-            if windows.isEmpty {
-                menu.addItem(withTitle: L10n.tr("No capturable windows", "没有可录制的窗口"), action: nil, keyEquivalent: "")
-            }
-            for w in windows {
-                let item = NSMenuItem(title: "\(w.appName) — \(w.title)",
-                                      action: #selector(self.windowMenuPicked(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = NSNumber(value: w.id)
-                menu.addItem(item)
-            }
-            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
-        }
-    }
-
-    @objc private func windowMenuPicked(_ sender: NSMenuItem) {
-        guard let num = sender.representedObject as? NSNumber else { return }
-        controller.startRecording(target: .window(windowID: CGWindowID(num.uint32Value)))
+        AppDelegate.shared?.showWindowPicker()
     }
 
     func startDisplayRecording(_ displayID: CGDirectDisplayID) {

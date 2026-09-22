@@ -160,6 +160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController?.view.window?.makeKey()
     }
 
+    /// Open the shared searchable picker, including when the recording area
+    /// overlay just dismissed itself to switch to window capture.
+    func showWindowPicker() {
+        openPopover()
+        NotificationCenter.default.post(name: .iRecordShowWindowPicker, object: nil)
+    }
+
     /// Registers global hotkeys and routes them to the recorder.
     private func setupGlobalShortcuts() {
         ShortcutManager.shared.onTrigger = { action in
@@ -182,8 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     controller.stopRecording()
                 } else {
                     // Open the panel and switch it to the window-picker sub-screen.
-                    self.openPopover()
-                    NotificationCenter.default.post(name: .iRecordShowWindowPicker, object: nil)
+                    self.showWindowPicker()
                 }
             case .pauseResume:
                 if controller.isRecording { controller.togglePause() }
