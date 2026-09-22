@@ -53,22 +53,31 @@ iRecord follows iRecord's two-phase model:
 
 A full screenshot suite modelled on iShot lives next to the recorder:
 
-- **Region screenshot** — freezes every display, then a crosshair with
-  full-screen guide lines, a **magnifier** (zoomed pixels + `#HEX` colour +
-  coordinates) and live `W × H` readout. After the drag, a floating toolbar
-  offers: **long screenshot · pin · edit · copy · save · cancel**.
+- **Region screenshot** — freezes every display, with a visible arrow cursor,
+  full-screen guide lines and a live `W × H` readout. Resize a selection from
+  its edges or drag inside it to move it. The floating toolbar offers
+  **annotations · long screenshot · pin · OCR · copy · save · cancel**.
   Keys: **Enter** copy · **Space** save · **S** scrolling · **T** pin ·
-  **R / H** copy pixel RGB / HEX · **Esc / right-click** cancel · double-click
-  copies instantly.
+  **R / H** copy pixel RGB / HEX · **Esc** discard. Double-click inside or
+  outside the selected area to copy the screenshot, including annotations,
+  and exit with a confirmation toast. When local saving is enabled, the same
+  image is also saved to the configured folder. An accidental single click
+  outside the selection keeps the screenshot open.
 - **Scrolling screenshot (长截图)** — pick the scrollable region, then scroll
   (wheel / trackpad / auto-scroll button). Frames are captured ~6×/s and
   stitched pixel-accurately by template matching — works in *any* app, not
   just browsers. A live preview grows beside the region; Enter finishes,
   no-movement auto-stops, horizontal scroll aborts. The result opens in the
   annotation editor.
-- **Annotation editor (截屏编辑)** — pen · line · arrow · rectangle · ellipse ·
-  **mosaic** (pixel-block) · text · local highlight; 5 preset colours + custom
-  well, 3 stroke widths, ⌘Z undo. Flattened output to Save… / Copy / Pin.
+- **Annotation editor (截屏编辑)** — line · arrow · rectangle · ellipse ·
+  numbered marker · **mosaic** (pixel-block) · text, with ⌘Z undo.
+  The screenshot toolbar uses one colour button; its popup offers five preset
+  colours and **Small (20 pt) / Large (30 pt)** text sizes. Flattened output
+  can be saved, copied or pinned.
+- **OCR** — extracts Chinese and English text from the original frozen
+  selection using Apple Vision, without annotation interference. Results
+  preserve line breaks and can be edited before **Copy All**. If no text is
+  recognized, select the region again.
 - **Pin (贴图)** — floats the shot always-on-top: drag to move, scroll to
   zoom, hover for close button + opacity slider, right-click menu (Annotate /
   Copy / Save / Close), double-click or Esc closes. Because pins are ordinary
@@ -86,6 +95,15 @@ Headless checks: `--stitchtest` (synthetic page → stitch engine must rebuild
 it pixel-exactly) and `--shottest` (freeze displays, crop, write a PNG).
 
 > Intentionally **excluded**: iRecord's plugin architecture (per the project goal).
+
+## Command-line control
+
+The App includes an `irecord` CLI for Agent-driven window recording. Install it
+from **General Settings → Command-line Tools**, then run `irecord -h`.
+Commands cover window search and preview, start, pause, resume and stop, with
+JSON results. Recordings follow the App's save directory; `--crop-points` can
+remove browser chrome, and `--max-edge` controls output size.
+See the [CLI installation and usage guide (简体中文)](docs/CLI.zh-CN.md).
 
 ## Requirements
 
@@ -162,8 +180,8 @@ Sources/iRecord/
     AppCoordinator.swift          Permission flow + area/window pickers + opens editor on finish
   Screenshot/
     ScreenshotCapture.swift       Still capture: freeze displays, region crop, live rect capture
-    ScreenshotOverlayController.swift Frozen-screen selection overlay (magnifier, guides, toolbar)
-    ScreenshotEditorWindow.swift  Annotation editor (pen/arrow/rect/mosaic/text/highlight, undo)
+    ScreenshotOverlayController.swift Frozen-screen selection overlay (resize, guides, toolbar, OCR)
+    ScreenshotEditorWindow.swift  Annotation editor (line/arrow/rect/marker/mosaic/text, undo)
     PinWindow.swift               Always-on-top pinned images (贴图, zoom/opacity/二次标注)
     ScrollingCaptureController.swift Scrolling capture loop, HUD, live preview
     ImageStitcher.swift           Template-match vertical stitcher for 长截图
