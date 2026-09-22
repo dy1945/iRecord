@@ -119,6 +119,15 @@ On first launch, grant **Screen Recording** permission in
 *System Settings ▸ Privacy & Security ▸ Screen Recording* (and **Microphone** if
 you enable mic capture), then relaunch.
 
+**Direct installation and updates:** The current GitHub download uses ad-hoc
+signing and has not been notarized by Apple. After installing or replacing an
+existing copy, macOS may ask you to grant Screen Recording permission again,
+and Microphone permission if you use microphone capture. If the new version
+reports missing permission despite an earlier grant, quit iRecord, check the
+corresponding entry in **System Settings → Privacy & Security**, enable access
+for iRecord again, then relaunch. macOS determines when another grant is needed;
+it is not required on every launch.
+
 ## Verify the pipeline (headless)
 
 A built-in self-test records the main display and validates the output file —
