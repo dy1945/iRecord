@@ -523,7 +523,55 @@ enum SelfTest {
             print("[selectiontest] FAIL: annotation event routing")
             exit(5)
         }
-        print("[selectiontest] PASS: center move, 8 handles, bounds clamp, minimum size, annotation event routing")
+        var recording = RecordingAreaSelection(rect: rect, hasSelection: true)
+        recording.press(at: CGPoint(x: 200, y: 160))
+        recording.release()
+        guard recording.rect == rect else {
+            print("[selectiontest] FAIL: recording click moved selection")
+            exit(6)
+        }
+        recording.press(at: CGPoint(x: 200, y: 160))
+        recording.drag(to: CGPoint(x: 240, y: 190), within: bounds)
+        recording.release()
+        guard recording.rect == CGRect(x: 140, y: 110, width: 200, height: 160) else {
+            print("[selectiontest] FAIL: recording move \(recording.rect)")
+            exit(7)
+        }
+        recording.press(at: CGPoint(x: 340, y: 190))
+        recording.drag(to: CGPoint(x: 370, y: 190), within: bounds)
+        recording.release()
+        guard recording.rect == CGRect(x: 140, y: 110, width: 230, height: 160) else {
+            print("[selectiontest] FAIL: recording edge resize \(recording.rect)")
+            exit(8)
+        }
+        recording.press(at: CGPoint(x: 20, y: 20))
+        recording.drag(to: CGPoint(x: 80, y: 70), within: bounds)
+        recording.release()
+        guard recording.rect == CGRect(x: 20, y: 20, width: 60, height: 50) else {
+            print("[selectiontest] FAIL: recording redraw \(recording.rect)")
+            exit(9)
+        }
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("irecord-export-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        do {
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let source = tempDir.appendingPathComponent("source.mp4")
+            try Data("new".utf8).write(to: source)
+            let existing = tempDir.appendingPathComponent("clip.mp4")
+            try Data("old".utf8).write(to: existing)
+            let saved = try RecordingExportDestination.save(source, in: tempDir,
+                                                            baseName: "clip", extension: "mp4")
+            guard saved.lastPathComponent == "clip-1.mp4",
+                  try Data(contentsOf: saved) == Data("new".utf8),
+                  try Data(contentsOf: existing) == Data("old".utf8) else {
+                print("[selectiontest] FAIL: configured directory export")
+                exit(10)
+            }
+        } catch {
+            print("[selectiontest] FAIL: configured directory export: \(error)")
+            exit(11)
+        }
+        print("[selectiontest] PASS: screenshot geometry, recording move/resize/redraw, configured directory export")
         exit(0)
     }
 

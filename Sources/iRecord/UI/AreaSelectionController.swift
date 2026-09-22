@@ -99,6 +99,60 @@ private final class SelectionWindow: NSWindow {
 
 // MARK: - View
 
+/// Keeps the original rectangle until a real drag begins. A click and release
+/// inside an existing selection must never move or replace it.
+struct RecordingAreaSelection {
+    private(set) var rect: CGRect
+    private(set) var hasSelection: Bool
+    private var pressPoint: CGPoint?
+    private var originalRect: CGRect = .zero
+    private var hit: ShotSelectionHit = .none
+    private(set) var isDragging = false
+
+    init(rect: CGRect = .zero, hasSelection: Bool = false) {
+        self.rect = rect
+        self.hasSelection = hasSelection
+    }
+
+    mutating func select(_ rect: CGRect) {
+        self.rect = rect
+        hasSelection = true
+        release()
+    }
+
+    mutating func press(at point: CGPoint) {
+        pressPoint = point
+        originalRect = rect
+        hit = hasSelection ? ShotSelectionGeometry.hitTest(point, in: rect) : .none
+        isDragging = false
+    }
+
+    mutating func drag(to point: CGPoint, within bounds: CGRect) {
+        guard let start = pressPoint else { return }
+        let point = CGPoint(x: max(bounds.minX, min(bounds.maxX, point.x)),
+                            y: max(bounds.minY, min(bounds.maxY, point.y)))
+        let delta = CGPoint(x: point.x - start.x, y: point.y - start.y)
+        guard isDragging || hypot(delta.x, delta.y) >= 3 else { return }
+        isDragging = true
+        switch hit {
+        case .move:
+            rect = ShotSelectionGeometry.moved(originalRect, delta: delta, within: bounds)
+        case .resize(let handle):
+            rect = ShotSelectionGeometry.resized(originalRect, handle: handle, delta: delta, within: bounds)
+        case .none:
+            rect = CGRect(x: min(start.x, point.x), y: min(start.y, point.y),
+                          width: abs(delta.x), height: abs(delta.y))
+            hasSelection = true
+        }
+    }
+
+    mutating func release() {
+        pressPoint = nil
+        hit = .none
+        isDragging = false
+    }
+}
+
 private final class SelectionView: NSView {
     var window_screenFrame: CGRect = .zero
     var onConfirmLocalRect: ((CGRect) -> Void)?
@@ -106,9 +160,9 @@ private final class SelectionView: NSView {
     var onWindowMode: (() -> Void)?
 
     private let isPrimary: Bool
-    private var startPoint: CGPoint?
-    private var currentRect: CGRect = .zero
-    private var hasSelection = false
+    private var selection = RecordingAreaSelection()
+    private var currentRect: CGRect { selection.rect }
+    private var hasSelection: Bool { selection.hasSelection }
 
     private var toolbar: CaptureToolbarView!
 
@@ -140,8 +194,7 @@ private final class SelectionView: NSView {
         if isPrimary {
             let w = bounds.width * 0.6
             let h = bounds.height * 0.5
-            currentRect = CGRect(x: bounds.midX - w/2, y: bounds.midY - h/2, width: w, height: h).integral
-            hasSelection = true
+            selection.select(CGRect(x: bounds.midX - w/2, y: bounds.midY - h/2, width: w, height: h).integral)
             layoutToolbar()
         } else {
             toolbar.isHidden = true
@@ -151,6 +204,20 @@ private final class SelectionView: NSView {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .crosshair)
+        guard hasSelection else { return }
+        let r = currentRect
+        let s = ShotSelectionGeometry.hitSlop
+        addCursorRect(r.insetBy(dx: s, dy: s), cursor: .arrow)
+        addCursorRect(CGRect(x: r.minX + s, y: r.minY - s, width: max(0, r.width - 2*s), height: 2*s), cursor: .resizeUpDown)
+        addCursorRect(CGRect(x: r.minX + s, y: r.maxY - s, width: max(0, r.width - 2*s), height: 2*s), cursor: .resizeUpDown)
+        addCursorRect(CGRect(x: r.minX - s, y: r.minY + s, width: 2*s, height: max(0, r.height - 2*s)), cursor: .resizeLeftRight)
+        addCursorRect(CGRect(x: r.maxX - s, y: r.minY + s, width: 2*s, height: max(0, r.height - 2*s)), cursor: .resizeLeftRight)
+        for handle in [ShotSelectionHandle.northWest, .southEast, .northEast, .southWest] {
+            let p = ShotSelectionGeometry.handlePoint(handle, in: r)
+            let cursor = (handle == .northWest || handle == .southEast)
+                ? ShotSelectionCursor.resizeNorthWestSouthEast : ShotSelectionCursor.resizeNorthEastSouthWest
+            addCursorRect(CGRect(x: p.x - s, y: p.y - s, width: 2*s, height: 2*s), cursor: cursor)
+        }
     }
 
     // MARK: Mouse
@@ -159,24 +226,24 @@ private final class SelectionView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         // Clicks on the toolbar are handled by its buttons.
         if let tb = toolbar, !tb.isHidden, tb.frame.contains(p) { return }
-        startPoint = p
-        currentRect = CGRect(origin: p, size: .zero)
-        hasSelection = true
-        toolbar.isHidden = true
-        needsDisplay = true
+        selection.press(at: p)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let start = startPoint else { return }
         let p = convert(event.locationInWindow, from: nil)
-        currentRect = CGRect(x: min(start.x, p.x), y: min(start.y, p.y),
-                             width: abs(p.x - start.x), height: abs(p.y - start.y))
-        needsDisplay = true
+        selection.drag(to: p, within: bounds)
+        if selection.isDragging {
+            toolbar.isHidden = true
+            needsDisplay = true
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
-        if event.clickCount >= 2 { confirm(); return }
+        let didDrag = selection.isDragging
+        selection.release()
+        if event.clickCount >= 2 && !didDrag { confirm(); return }
         layoutToolbar()
+        window?.invalidateCursorRects(for: self)
         needsDisplay = true
     }
 
@@ -191,9 +258,9 @@ private final class SelectionView: NSView {
     // MARK: Actions
 
     private func selectFullScreen() {
-        currentRect = bounds
-        hasSelection = true
+        selection.select(bounds)
         layoutToolbar()
+        window?.invalidateCursorRects(for: self)
         needsDisplay = true
     }
 

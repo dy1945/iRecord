@@ -131,7 +131,8 @@ final class ExportEditorWindowController: NSWindowController {
         formatPopup.target = self
         formatPopup.action = #selector(formatChanged)
 
-        destinationPopup.addItems(withTitles: [L10n.tr("Save to File…", "存储到文件…"), L10n.tr("Copy to Clipboard", "复制到剪贴板")])
+        destinationPopup.addItems(withTitles: [L10n.tr("Save to Recording Folder", "保存到录制目录"), L10n.tr("Copy to Clipboard", "复制到剪贴板")])
+        destinationPopup.toolTip = defaultDirectory.path
 
         let leftStack = NSStackView(views: [
             muteButton,
@@ -354,26 +355,16 @@ final class ExportEditorWindowController: NSWindowController {
     // MARK: - Destinations
 
     private func saveToFile(_ temp: URL, ext: String) {
-        let panel = NSSavePanel()
-        panel.directoryURL = defaultDirectory
-        panel.nameFieldStringValue = "\(RecordingController.recordingBaseName()).\(ext)"
-        panel.canCreateDirectories = true
-        panel.begin { [weak self] response in
-            guard let self else { return }
-            if response == .OK, let dest = panel.url {
-                do {
-                    try? FileManager.default.removeItem(at: dest)
-                    try FileManager.default.moveItem(at: temp, to: dest)
-                    self.didExportOrSave = true
-                    self.onExported?(dest)
-                    NSWorkspace.shared.activateFileViewerSelecting([dest])
-                    self.close()
-                } catch {
-                    self.showError(error)
-                }
-            } else {
-                try? FileManager.default.removeItem(at: temp)
-            }
+        do {
+            let dest = try RecordingExportDestination.save(temp, in: defaultDirectory,
+                                                           baseName: RecordingController.recordingBaseName(),
+                                                           extension: ext)
+            didExportOrSave = true
+            onExported?(dest)
+            NSWorkspace.shared.activateFileViewerSelecting([dest])
+            close()
+        } catch {
+            showError(error)
         }
     }
 
@@ -403,6 +394,29 @@ final class ExportEditorWindowController: NSWindowController {
     private func showError(_ error: Error) {
         let alert = NSAlert(error: error)
         alert.runModal()
+    }
+}
+
+/// Use the configured recording directory without replacing an older export.
+enum RecordingExportDestination {
+    static func save(_ source: URL, in directory: URL, baseName: String,
+                     extension fileExtension: String) throws -> URL {
+        let fm = FileManager.default
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        for index in 0..<10_000 {
+            let name = index == 0 ? baseName : "\(baseName)-\(index)"
+            let destination = directory.appendingPathComponent(name).appendingPathExtension(fileExtension)
+            if fm.fileExists(atPath: destination.path) { continue }
+            do {
+                try fm.copyItem(at: source, to: destination)
+                try? fm.removeItem(at: source)
+                return destination
+            } catch let error as NSError where error.domain == NSCocoaErrorDomain &&
+                error.code == CocoaError.fileWriteFileExists.rawValue {
+                continue
+            }
+        }
+        throw CocoaError(.fileWriteFileExists)
     }
 }
 
