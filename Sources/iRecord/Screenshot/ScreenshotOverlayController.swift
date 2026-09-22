@@ -382,7 +382,7 @@ private final class ShotOverlayWindow: NSWindow {
 
 // MARK: - View
 
-private final class ShotOverlayView: NSView {
+final class ShotOverlayView: NSView {
     var screenGlobalFrame: CGRect = .zero
     var onAction: ((CGRect, ShotAction) -> Void)?
     var onEditedAction: ((NSImage, ShotAction) -> Void)?
@@ -477,7 +477,7 @@ private final class ShotOverlayView: NSView {
         adoptAutoSelection(globalRect: first, lock: true)
     }
 
-    private func adoptAutoSelection(globalRect: CGRect, lock: Bool) {
+    func adoptAutoSelection(globalRect: CGRect, lock: Bool) {
         let local = globalRect
             .offsetBy(dx: -screenGlobalFrame.origin.x, dy: -screenGlobalFrame.origin.y)
             .intersection(bounds).integral
@@ -527,6 +527,11 @@ private final class ShotOverlayView: NSView {
         guard let start = startPoint else { return }
         let p = clampedToBounds(convert(event.locationInWindow, from: nil))
         mouse = p
+        // A blank-space click can include a little pointer movement. Keep the
+        // existing selection and annotations until a usable new crop exists.
+        if dragHit == .none,
+           (abs(p.x - start.x) < ShotSelectionGeometry.minimumSize ||
+            abs(p.y - start.y) < ShotSelectionGeometry.minimumSize) { return }
         if !dragging {
             guard abs(p.x - start.x) > 4 || abs(p.y - start.y) > 4 else { return }
             dragging = true
@@ -565,15 +570,11 @@ private final class ShotOverlayView: NSView {
         startPoint = nil
         dragging = false
         dragHit = .none
-        if event.clickCount >= 2 {
-            confirm(scrollingMode ? .scrolling : .copy)
-            return
-        }
         if !wasDragging {
-            // Bare click: inside an existing selection keeps it (so a following
-            // double-click copies it); otherwise lock the window under the
-            // cursor (when hover-framing is on); empty space clears.
-            if completedHit != .none || (hasSelection && currentRect.contains(p)) {
+            // Once editing starts, bare clicks anywhere keep that selection.
+            // Reselection requires a deliberate drag; canvas double-clicks
+            // are ordinary clicks, never an implicit finish action.
+            if (locked && hasSelection) || completedHit != .none || (hasSelection && currentRect.contains(p)) {
                 hoverActive = false
                 locked = true
                 selectionCommitted = true
@@ -634,8 +635,8 @@ private final class ShotOverlayView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        if editorView?.currentTool != nil { editorView?.currentTool = nil }
-        else { onAction?(.zero, .cancel) }
+        // Right-click can leave a drawing tool, but never close the screenshot.
+        editorView?.currentTool = nil
     }
 
     override func keyDown(with event: NSEvent) {
@@ -858,8 +859,8 @@ private final class ShotOverlayView: NSView {
         let text = scrollingMode
             ? L10n.tr("Click a window or drag the scrolling area · Enter starts · Esc cancels",
                       "点击窗口或拖拽框选滚动区域 · 回车开始 · Esc 取消")
-            : L10n.tr("Click a window or drag an area · double-click copies · Esc cancels",
-                      "点击窗口或拖拽框选 · 双击复制 · Esc 取消")
+            : L10n.tr("Click a window or drag an area · Enter copies · Esc cancels",
+                      "点击窗口或拖拽框选 · 回车复制 · Esc 取消")
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 14, weight: .medium),
             .foregroundColor: NSColor.white

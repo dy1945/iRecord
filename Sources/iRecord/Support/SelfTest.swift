@@ -586,8 +586,114 @@ enum SelfTest {
             print("[selectiontest] FAIL: configured directory export: \(error)")
             exit(11)
         }
-        print("[selectiontest] PASS: screenshot geometry, recording move/resize/redraw, configured directory export")
+        verifyPersistentShotSelection()
+        print("[selectiontest] PASS: screenshot geometry, persistent screenshot interaction, recording move/resize/redraw, configured directory export")
         exit(0)
+    }
+
+    /// Exercise the overlay's real mouse handlers without showing a window or
+    /// capturing the user's screen. Accidental clicks must preserve editing.
+    private static func verifyPersistentShotSelection() {
+        _ = NSApplication.shared
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        guard let image = syntheticPage(width: 1000, height: 800) else {
+            print("[selectiontest] FAIL: screenshot interaction fixture")
+            exit(13)
+        }
+        let frozen = ScreenshotCapture.FrozenDisplay(displayID: 0, image: image, frame: bounds)
+        for (scrolling, autoSelection) in [(false, false), (true, false), (false, true), (true, true)] {
+            let view = ShotOverlayView(frozen: frozen, scrolling: scrolling)
+            let window = NSWindow(contentRect: bounds, styleMask: .borderless, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            view.frame = bounds
+            window.contentView = view
+            var actions: [ShotAction] = []
+            view.onAction = { _, action in actions.append(action) }
+            view.onEditedAction = { _, action in actions.append(action) }
+
+            func event(_ type: NSEvent.EventType, _ point: CGPoint, clicks: Int = 1) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
+                                   windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                   clickCount: clicks, pressure: 1)!
+            }
+            func click(_ point: CGPoint, clicks: Int = 1) {
+                let target = view.hitTest(point) ?? view
+                target.mouseDown(with: event(.leftMouseDown, point, clicks: clicks))
+                target.mouseUp(with: event(.leftMouseUp, point, clicks: clicks))
+            }
+            func drag(_ start: CGPoint, to end: CGPoint) {
+                let target = view.hitTest(start) ?? view
+                target.mouseDown(with: event(.leftMouseDown, start))
+                target.mouseDragged(with: event(.leftMouseDragged, end))
+                target.mouseUp(with: event(.leftMouseUp, end))
+            }
+            if autoSelection {
+                view.adoptAutoSelection(globalRect: CGRect(x: 200, y: 200, width: 400, height: 300), lock: true)
+            } else {
+                view.mouseDown(with: event(.leftMouseDown, CGPoint(x: 200, y: 200)))
+                view.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: 600, y: 500)))
+                view.mouseUp(with: event(.leftMouseUp, CGPoint(x: 600, y: 500)))
+            }
+            guard let toolbar = view.subviews.compactMap({ $0 as? ShotToolbarView }).first else {
+                print("[selectiontest] FAIL: selection did not enter editing")
+                exit(14)
+            }
+            let editor = view.subviews.compactMap { $0 as? AnnotationEditorView }.first
+            let originalCrop = editor?.cropRect
+            if let editor {
+                editor.currentTool = .rect
+                drag(CGPoint(x: 250, y: 300), to: CGPoint(x: 330, y: 340))
+                editor.currentTool = .arrow
+                drag(CGPoint(x: 400, y: 420), to: CGPoint(x: 500, y: 460))
+                guard editor.shapes.count == 2 else {
+                    print("[selectiontest] FAIL: rectangle and arrow gestures must create annotations")
+                    exit(18)
+                }
+            }
+            click(CGPoint(x: 50, y: 700))
+            drag(CGPoint(x: 50, y: 700), to: CGPoint(x: 55, y: 705))
+            guard toolbar.superview === view, !toolbar.isHidden,
+                  scrolling || (editor?.superview === view && editor?.cropRect == originalCrop),
+                  scrolling || editor?.shapes.count == 2,
+                  actions.isEmpty else {
+                print("[selectiontest] FAIL: blank click discarded screenshot editing (scrolling=\(scrolling), autoSelection=\(autoSelection))")
+                exit(15)
+            }
+            click(CGPoint(x: 50, y: 700), clicks: 2)
+            editor?.currentTool = nil
+            click(CGPoint(x: 400, y: 350), clicks: 2)
+            view.rightMouseDown(with: event(.rightMouseDown, CGPoint(x: 50, y: 700)))
+            guard actions.isEmpty, toolbar.superview === view, !toolbar.isHidden else {
+                print("[selectiontest] FAIL: canvas click finished or cancelled screenshot (scrolling=\(scrolling))")
+                exit(16)
+            }
+            // A deliberate new selection still works after the ignored clicks.
+            drag(CGPoint(x: 650, y: 550), to: CGPoint(x: 900, y: 720))
+            let newEditor = view.subviews.compactMap { $0 as? AnnotationEditorView }.first
+            guard scrolling || (newEditor !== editor && newEditor?.cropRect == CGRect(x: 650, y: 80, width: 250, height: 170)),
+                  actions.isEmpty else {
+                print("[selectiontest] FAIL: deliberate reselection must remain available")
+                exit(19)
+            }
+            let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                         windowNumber: window.windowNumber, context: nil, characters: "\r",
+                                         charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+            view.keyDown(with: enter)
+            guard actions.count == 1, actions.first == (scrolling ? .scrolling : .copy) else {
+                print("[selectiontest] FAIL: explicit completion must remain available")
+                exit(20)
+            }
+            actions.removeAll()
+            let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                          windowNumber: window.windowNumber, context: nil, characters: "\u{1b}",
+                                          charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+            view.keyDown(with: escape)
+            guard actions.count == 1, actions.first == .cancel else {
+                print("[selectiontest] FAIL: explicit Escape must still cancel")
+                exit(17)
+            }
+            window.close()
+        }
     }
 
     /// Deterministic synthetic page: horizontal bands filled with
