@@ -211,6 +211,18 @@ struct ControlPanelView: View {
 
     private var saveToScreen: some View {
         VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                backButton(title: L10n.tr("Main Menu", "返回主菜单")) {
+                    returnToMainMenu()
+                }
+                Spacer()
+                Text(L10n.tr("Save Location", "保存位置"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(theme.textSecondary)
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 12)
+
             sectionCaption("RECORD", "录制").padding(.leading, 6)
             card {
                 let dirs = dirCandidates(current: controller.outputDirectory,
@@ -272,7 +284,7 @@ struct ControlPanelView: View {
                 actionRow(symbol: "gearshape",
                           title: L10n.tr("More Settings…", "更多设置…"),
                           subtitle: L10n.tr("Naming / Format / Shortcuts", "命名 / 格式 / 快捷键")) {
-                    saveToVisible = false
+                    returnToMainMenu()
                     SettingsWindowController.shared.show(tab: .save)
                 }
             }
@@ -375,6 +387,12 @@ struct ControlPanelView: View {
 
     // MARK: Window picker (sub-screen)
 
+    private func returnToMainMenu() {
+        saveToVisible = false
+        windowPickerVisible = false
+        windowSearch = ""
+    }
+
     private func openWindowPicker() {
         saveToVisible = false
         windowPickerVisible = true
@@ -397,7 +415,7 @@ struct ControlPanelView: View {
     private var windowPicker: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                backButton { windowPickerVisible = false }
+                backButton { returnToMainMenu() }
                 Spacer()
                 Text(L10n.tr("Select Window", "选择窗口"))
                     .font(.system(size: 13, weight: .semibold)).foregroundColor(theme.textSecondary)
@@ -616,8 +634,12 @@ struct ControlPanelView: View {
         HStack(spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
-                    saveToVisible.toggle()
-                    windowPickerVisible = false
+                    if saveToVisible {
+                        returnToMainMenu()
+                    } else {
+                        returnToMainMenu()
+                        saveToVisible = true
+                    }
                 }
             } label: {
                 HStack(spacing: 6) {
@@ -654,6 +676,7 @@ struct ControlPanelView: View {
                 NSWorkspace.shared.open(controller.outputDirectory)
             }
             barIcon("gearshape", tip: L10n.tr("Settings", "设置")) {
+                returnToMainMenu()
                 SettingsWindowController.shared.show()
             }
             barIcon("power", tip: L10n.tr("Quit", "退出")) {
@@ -692,11 +715,12 @@ struct ControlPanelView: View {
         Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, inset)
     }
 
-    private func backButton(_ action: @escaping () -> Void) -> some View {
+    private func backButton(title: String = L10n.tr("Back", "返回"),
+                            _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
-                Text(L10n.tr("Back", "返回")).font(.system(size: 13))
+                Text(title).font(.system(size: 13))
             }
             .foregroundColor(.accentColor)
         }

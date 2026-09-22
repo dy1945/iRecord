@@ -43,7 +43,7 @@ enum ShotSelectionCursor {
     }()
 
     /// Outside a locked crop: keep the same visible arrow, with a prohibition
-    /// badge below it to distinguish the double-click-to-cancel area.
+    /// badge below it to distinguish the double-click-to-finish area.
     static let outsideCursor: NSCursor = {
         let image = NSImage(size: NSSize(width: 30, height: 48), flipped: false) { _ in
             let arrow = NSBezierPath()
@@ -185,6 +185,7 @@ final class ScreenshotController {
 
     /// Region screenshot (iShot ⇧A equivalent): freeze screen → select → toolbar.
     func startRegionCapture() {
+        ScreenshotCopyToast.shared.hide()
         AppDelegate.shared?.closePopover()
         AppCoordinator.shared.ensureScreenPermission { [weak self] granted in
             guard granted else { return }
@@ -195,6 +196,7 @@ final class ScreenshotController {
     /// Scrolling screenshot: same selection UI, but the toolbar's primary
     /// action starts the scrolling capture engine.
     func startScrollingCapture() {
+        ScreenshotCopyToast.shared.hide()
         AppDelegate.shared?.closePopover()
         AppCoordinator.shared.ensureScreenPermission { [weak self] granted in
             guard granted else { return }
@@ -205,6 +207,7 @@ final class ScreenshotController {
     /// Instant full-screen capture of every display (composited), straight to
     /// the clipboard, mirroring iShot's full-screen hotkey.
     func captureFullScreen() {
+        ScreenshotCopyToast.shared.hide()
         AppDelegate.shared?.closePopover()
         AppCoordinator.shared.ensureScreenPermission { granted in
             guard granted else { return }
@@ -256,6 +259,7 @@ final class ScreenshotOverlayController {
     private var frozen: [ScreenshotCapture.FrozenDisplay] = []
     private var candidateWindows: [CGRect] = []
     private var ocrTask: Task<Void, Never>?
+    private weak var activeSelectionView: ShotOverlayView?
 
     func begin(frozen: [ScreenshotCapture.FrozenDisplay], scrolling: Bool) {
         dismiss()
@@ -272,7 +276,13 @@ final class ScreenshotOverlayController {
             win.shotView.hasSelectionInSession = { [weak self] in
                 self?.windows.contains { ($0 as? ShotOverlayWindow)?.shotView.hasLockedSelection == true } ?? false
             }
-            win.shotView.onSelectionStateChanged = { [weak self] in
+            win.shotView.onCopySelectionInSession = { [weak self] in
+                self?.copyCurrentSelection()
+            }
+            win.shotView.onSelectionStateChanged = { [weak self, weak win] in
+                if let view = win?.shotView, view.hasLockedSelection {
+                    self?.activeSelectionView = view
+                }
                 for case let window as ShotOverlayWindow in self?.windows ?? [] {
                     window.shotView.invalidateSelectionCursors()
                 }
@@ -288,6 +298,7 @@ final class ScreenshotOverlayController {
     func dismiss() {
         ocrTask?.cancel()
         ocrTask = nil
+        activeSelectionView = nil
         windows.forEach { $0.orderOut(nil) }
         windows.removeAll()
     }
@@ -296,6 +307,15 @@ final class ScreenshotOverlayController {
         for case let win as ShotOverlayWindow in windows where win.shotView !== view {
             win.shotView.clearAutoSelection()
         }
+    }
+
+    private func copyCurrentSelection() {
+        if let activeSelectionView, activeSelectionView.hasLockedSelection {
+            activeSelectionView.copySelectionAndExit()
+            return
+        }
+        windows.compactMap { ($0 as? ShotOverlayWindow)?.shotView }
+            .first(where: { $0.hasLockedSelection })?.copySelectionAndExit()
     }
 
     /// On-screen windows (front-to-back), converted to global Cocoa coordinates
@@ -331,7 +351,8 @@ final class ScreenshotOverlayController {
         let image = NSImage(cgImage: cg, size: size)
         switch action {
         case .copy:
-            ScreenshotFileIO.handleScreenshotCopy(image: image)
+            ScreenshotFileIO.handleScreenshotCopy(image: image, forceClipboard: true)
+            ScreenshotCopyToast.shared.show()
         case .save:
             ScreenshotFileIO.save(image: image, suggestedName: ScreenshotFileIO.defaultName())
         case .pin:
@@ -377,7 +398,8 @@ final class ScreenshotOverlayController {
         dismiss()
         switch action {
         case .copy:
-            ScreenshotFileIO.handleScreenshotCopy(image: image)
+            ScreenshotFileIO.handleScreenshotCopy(image: image, forceClipboard: true)
+            ScreenshotCopyToast.shared.show()
         case .save:
             ScreenshotFileIO.save(image: image, suggestedName: ScreenshotFileIO.defaultName())
         case .pin:
@@ -427,6 +449,11 @@ private final class ShotOverlayWindow: NSWindow {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        if shotView.handleDoubleClick(event, forward: { super.sendEvent($0) }) { return }
+        super.sendEvent(event)
+    }
 }
 
 // MARK: - View
@@ -437,6 +464,7 @@ final class ShotOverlayView: NSView {
     var onEditedAction: ((NSImage, ShotAction) -> Void)?
     var onClaimAutoSelection: ((ShotOverlayView) -> Void)?
     var hasSelectionInSession: (() -> Bool)?
+    var onCopySelectionInSession: (() -> Void)?
     var onSelectionStateChanged: (() -> Void)?
     var hasLockedSelection: Bool { locked && hasSelection }
 
@@ -449,6 +477,9 @@ final class ShotOverlayView: NSView {
     private var dragHit: ShotSelectionHit = .none
     private var dragStartRect: CGRect = .zero
     private var dragging = false
+    private var pendingDoubleClick: NSEvent?
+    private var sawFirstClick = false
+    private var shapesBeforeFirstClick: Int?
     private var currentRect: CGRect = .zero
     private var hasSelection = false
     /// Auto/hover selection is only a visual suggestion. Moving and resizing
@@ -574,6 +605,53 @@ final class ShotOverlayView: NSView {
 
     // MARK: Mouse
 
+    /// Intercept completion before text fields or annotation tools consume the
+    /// second click. If it turns into a drag, replay its press to the normal
+    /// responder so drawing, moving and resizing keep their usual behavior.
+    func handleDoubleClick(_ event: NSEvent, forward: (NSEvent) -> Void) -> Bool {
+        let point = convert(event.locationInWindow, from: nil)
+        switch event.type {
+        case .leftMouseDown:
+            pendingDoubleClick = nil
+            if event.clickCount == 1 {
+                sawFirstClick = true
+                shapesBeforeFirstClick = isCopyCompletionPoint(point) ? editorView?.shapes.count : nil
+            }
+            guard event.clickCount >= 2, sawFirstClick, isCopyCompletionPoint(point) else { return false }
+            pendingDoubleClick = event
+            return true
+        case .leftMouseDragged, .leftMouseUp:
+            guard let press = pendingDoubleClick else { return false }
+            let start = convert(press.locationInWindow, from: nil)
+            let moved = abs(point.x - start.x) > 4 || abs(point.y - start.y) > 4
+            if moved || !isCopyCompletionPoint(point) {
+                pendingDoubleClick = nil
+                shapesBeforeFirstClick = nil
+                forward(press)
+                return false
+            }
+            if event.type == .leftMouseUp {
+                pendingDoubleClick = nil
+                sawFirstClick = false
+                if let count = shapesBeforeFirstClick {
+                    editorView?.discardEmptyMarker(addedAfter: count)
+                }
+                shapesBeforeFirstClick = nil
+                if hasLockedSelection { copySelectionAndExit() }
+                else { onCopySelectionInSession?() }
+            }
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isCopyCompletionPoint(_ point: CGPoint) -> Bool {
+        if let toolbar, !toolbar.isHidden, toolbar.frame.contains(point) { return false }
+        if isOutsideSelection(at: point) { return true }
+        return hasLockedSelection && ShotSelectionGeometry.hitTest(point, in: currentRect) == .move
+    }
+
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if let tb = toolbar, !tb.isHidden, tb.frame.contains(p) { return }
@@ -631,14 +709,9 @@ final class ShotOverlayView: NSView {
         mouse = p
         let wasDragging = dragging
         let completedHit = dragHit
-        let pressedOutside = startPoint.map { isOutsideSelection(at: $0) } ?? false
         startPoint = nil
         dragging = false
         dragHit = .none
-        if !wasDragging, event.clickCount >= 2, pressedOutside, isOutsideSelection(at: p) {
-            onAction?(.zero, .cancel)
-            return
-        }
         if !wasDragging, !hasLockedSelection, isOutsideSelection(at: p) {
             // A selection on another display stays active after this click.
             cursor(at: p).set()
@@ -646,8 +719,8 @@ final class ShotOverlayView: NSView {
         }
         if !wasDragging {
             // Once editing starts, bare clicks anywhere keep that selection.
-            // Reselection requires a deliberate drag; only a double-click on
-            // the outside backdrop cancels, never one on the crop or controls.
+            // Reselection requires a deliberate drag. Double-clicks on the
+            // crop or backdrop copy; resize edges and controls keep their jobs.
             if (locked && hasSelection) || completedHit != .none || (hasSelection && currentRect.contains(p)) {
                 hoverActive = false
                 locked = true
@@ -772,7 +845,21 @@ final class ShotOverlayView: NSView {
         CGPoint(x: max(0, min(bounds.width, p.x)), y: max(0, min(bounds.height, p.y)))
     }
 
+    func copySelectionAndExit() {
+        guard hasLockedSelection else { return }
+        confirm(.copy)
+    }
+
     private func confirm(_ action: ShotAction) {
+        if action == .cancel {
+            onAction?(.zero, .cancel)
+            return
+        }
+        if action == .copy || action == .save || action == .pin {
+            // Text can still be in the inline input field when the user
+            // double-clicks to finish. Commit it before deciding how to export.
+            editorView?.commitTextField()
+        }
         // Annotated shots export through the editor so drawings are baked in.
         if action != .scrolling, action != .ocr, let editor = editorView, !editor.shapes.isEmpty {
             onEditedAction?(editor.flattenedImage(), action)
@@ -843,14 +930,14 @@ final class ShotOverlayView: NSView {
         editor.onToolChanged = { [weak self] tool in
             guard let self else { return }
             self.toolbar?.highlightTool(tool)
-            // Tool deselected (Esc / clicking the active tool) → keys return to
+            // Tool deselected (right-click / clicking the active tool) → keys return to
             // the overlay so Enter / Space / colour-copy shortcuts work again.
             if tool == nil { self.window?.makeFirstResponder(self) }
         }
         addSubview(editor)
         editorView = editor
-        // The editor keeps first responder while attached: Esc deselects the
-        // active tool (or cancels), unhandled keys (R/H/S…) bubble up the
+        // The editor keeps first responder while attached: Esc cancels the
+        // screenshot; unhandled keys (R/H/S…) bubble up the
         // responder chain to the overlay. Losing responder entirely was why
         // Esc went dead after committing a text/caption field.
         window?.makeFirstResponder(editor)

@@ -279,17 +279,18 @@ enum ScreenshotFileIO {
         }
     }
 
-    static func copyToClipboard(image: NSImage) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([image])
+    static func copyToClipboard(image: NSImage, pasteboard: NSPasteboard = .general) {
+        pasteboard.clearContents()
+        pasteboard.writeObjects([image])
     }
 
     /// Screenshot output entry point: copies to the clipboard and/or writes the
     /// image to the effective screenshot directory, per the user's save settings.
-    static func handleScreenshotCopy(image: NSImage) {
+    static func handleScreenshotCopy(image: NSImage, forceClipboard: Bool = false,
+                                     pasteboard: NSPasteboard = .general) {
         let controller = RecordingController.shared
-        if controller.shotCopyToClipboard {
-            copyToClipboard(image: image)
+        if forceClipboard || controller.shotCopyToClipboard {
+            copyToClipboard(image: image, pasteboard: pasteboard)
         }
         if controller.screenshotAlsoSaves {
             saveQuietly(image: image)

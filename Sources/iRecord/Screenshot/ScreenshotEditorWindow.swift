@@ -343,7 +343,7 @@ enum EditorResult {
     case save(NSImage), copy(NSImage), pin(NSImage), cancelled
 }
 
-final class AnnotationEditorView: NSView {
+final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     static let widths: [CGFloat] = [2.5, 4.5, 8]
 
     let baseImage: NSImage
@@ -588,9 +588,7 @@ final class AnnotationEditorView: NSView {
            event.charactersIgnoringModifiers?.lowercased() == "z" {
             undo()
         } else if event.keyCode == 53 {                 // Esc
-            if textField != nil { commitTextField() }
-            else if currentTool != nil { currentTool = nil }
-            else { finish(.cancelled) }
+            finish(.cancelled)
         } else if event.keyCode == 36 || event.keyCode == 76 {   // Enter → copy
             finish(.copy(flattenedImage()))
         } else if event.keyCode == 49 {                 // Space → save
@@ -613,8 +611,26 @@ final class AnnotationEditorView: NSView {
     }
 
     func finish(_ result: EditorResult) {
-        commitTextField()
+        if case .cancelled = result {
+            let field = textField
+            textField = nil
+            captionIndex = nil
+            field?.removeFromSuperview()
+            window?.makeFirstResponder(self)
+        } else {
+            commitTextField()
+        }
         onFinished?(result)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        finish(.cancelled)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        finish(.cancelled)
+        return true
     }
 
     // MARK: Text
@@ -634,6 +650,7 @@ final class AnnotationEditorView: NSView {
         tf.placeholderString = L10n.tr("Text", "输入文字")
         tf.target = self
         tf.action = #selector(textCommitted(_:))
+        tf.delegate = self
         addSubview(tf)
         window?.makeFirstResponder(tf)
         textField = tf
@@ -641,7 +658,20 @@ final class AnnotationEditorView: NSView {
 
     @objc private func textCommitted(_ sender: NSTextField) { commitTextField() }
 
-    private func commitTextField() {
+    /// A marker tool stamps on the first click. When that press turns out to
+    /// be the first half of a completion double-click, omit its empty marker.
+    func discardEmptyMarker(addedAfter count: Int) {
+        guard shapes.count > count, shapes.last?.tool == .marker,
+              captionIndex == shapes.count - 1, let field = textField, field.stringValue.isEmpty else { return }
+        textField = nil
+        captionIndex = nil
+        field.removeFromSuperview()
+        shapes.removeLast()
+        window?.makeFirstResponder(self)
+        needsDisplay = true
+    }
+
+    func commitTextField() {
         guard let tf = textField else { return }
         textField = nil
         let str = tf.stringValue
@@ -713,6 +743,7 @@ final class AnnotationEditorView: NSView {
         tf.placeholderString = L10n.tr("Caption (optional)", "编号说明（可留空）")
         tf.target = self
         tf.action = #selector(textCommitted(_:))
+        tf.delegate = self
         addSubview(tf)
         window?.makeFirstResponder(tf)
         textField = tf
@@ -864,6 +895,7 @@ final class AnnotationEditorView: NSView {
     /// for flipped *views* only, so those paths un-flip locally (`flattening`).
     /// When `cropRect` is set, only that region (view coords) is exported.
     func flattenedImage() -> NSImage {
+        commitTextField()
         let crop = cropRect ?? NSRect(origin: .zero, size: baseImage.size)
         let pointSize = crop.size
         let pxW = Int((pointSize.width * scale).rounded())

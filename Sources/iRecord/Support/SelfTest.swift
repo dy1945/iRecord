@@ -403,13 +403,6 @@ enum SelfTest {
             editor.mouseDragged(with: mouse(.leftMouseDragged, b))
             editor.mouseUp(with: mouse(.leftMouseUp, b))
         }
-        func escKey() -> NSEvent {
-            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
-                             timestamp: ProcessInfo.processInfo.systemUptime,
-                             windowNumber: win.windowNumber, context: nil,
-                             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                             isARepeat: false, keyCode: 53)!
-        }
         func setField(_ text: String) {
             if let tf = editor.subviews.compactMap({ $0 as? NSTextField }).last { tf.stringValue = text }
         }
@@ -419,7 +412,7 @@ enum SelfTest {
         click(NSPoint(x: 90, y: 90))
         setField("第一步")
         click(NSPoint(x: 190, y: 140))          // commits caption 1, stamps 2
-        editor.keyDown(with: escKey())          // commits empty caption
+        editor.commitTextField()               // commits empty caption
 
         editor.currentTool = .arrow
         drag(NSPoint(x: 250, y: 220), NSPoint(x: 420, y: 130))
@@ -431,11 +424,11 @@ enum SelfTest {
         editor.currentTool = .mosaic
         drag(NSPoint(x: 400, y: 220), NSPoint(x: 560, y: 340))
 
-        // Text, committed with Esc, then dragged to a new position.
+        // Text, committed explicitly, then dragged to a new position.
         editor.currentTool = .text
         click(NSPoint(x: 300, y: 60))
         setField("拖动我")
-        editor.keyDown(with: escKey())
+        editor.commitTextField()
         editor.mouseDown(with: mouse(.leftMouseDown, NSPoint(x: 315, y: 75)))   // grabs the text
         editor.mouseDragged(with: mouse(.leftMouseDragged, NSPoint(x: 370, y: 180)))
         editor.mouseUp(with: mouse(.leftMouseUp, NSPoint(x: 370, y: 180)))
@@ -487,6 +480,7 @@ enum SelfTest {
         }
     }
 
+    @MainActor
     static func runShotSelectionGeometry() -> Never {
         let bounds = CGRect(x: 0, y: 0, width: 500, height: 400)
         let rect = CGRect(x: 100, y: 80, width: 200, height: 160)
@@ -589,12 +583,13 @@ enum SelfTest {
             exit(11)
         }
         verifyPersistentShotSelection()
-        print("[selectiontest] PASS: screenshot geometry, outside double-click exit and cursors, persistent editing, recording move/resize/redraw, configured directory export")
+        print("[selectiontest] PASS: screenshot geometry, inside/outside double-click copies annotations/text, Escape preserves clipboard, cross-display copy, cursors and persistent editing, recording move/resize/redraw, configured directory export")
         exit(0)
     }
 
     /// Exercise the overlay's real mouse handlers without showing a window or
     /// capturing the user's screen. Accidental clicks must preserve editing.
+    @MainActor
     private static func verifyPersistentShotSelection() {
         _ = NSApplication.shared
         let bounds = CGRect(x: 0, y: 0, width: 1000, height: 800)
@@ -603,6 +598,51 @@ enum SelfTest {
             exit(13)
         }
         let frozen = ScreenshotCapture.FrozenDisplay(displayID: 0, image: image, frame: bounds)
+        // Use the production image writer with an isolated board; regression
+        // checks must never replace the user's real clipboard.
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        func pixels(_ image: NSImage) -> Data {
+            guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let context = CGContext(data: nil, width: cg.width, height: cg.height,
+                                          bitsPerComponent: 8, bytesPerRow: cg.width * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  let data = context.data else {
+                print("[selectiontest] FAIL: cannot read exported pixels")
+                exit(33)
+            }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+            return Data(bytes: data, count: cg.width * cg.height * 4)
+        }
+        func clipboardMatches(_ expected: NSImage) -> Bool {
+            guard let copied = NSImage(pasteboard: pasteboard) else { return false }
+            return pixels(copied) == pixels(expected)
+        }
+        // Mirror ShotOverlayWindow.sendEvent: intercept before AppKit chooses
+        // the current hit view, then keep the original press target for drags.
+        // Replayed presses use the same dispatch path as the original event.
+        func eventRouter(for view: ShotOverlayView) -> (NSEvent) -> Void {
+            var pressedTarget: NSView?
+            func forward(_ event: NSEvent) {
+                switch event.type {
+                case .leftMouseDown:
+                    let point = view.convert(event.locationInWindow, from: nil)
+                    let target = view.hitTest(point) ?? view
+                    pressedTarget = target
+                    target.mouseDown(with: event)
+                case .leftMouseDragged:
+                    (pressedTarget ?? view).mouseDragged(with: event)
+                case .leftMouseUp:
+                    (pressedTarget ?? view).mouseUp(with: event)
+                    pressedTarget = nil
+                default: break
+                }
+            }
+            return { event in
+                if !view.handleDoubleClick(event, forward: forward) { forward(event) }
+            }
+        }
         for (scrolling, autoSelection) in [(false, false), (true, false), (false, true), (true, true)] {
             let view = ShotOverlayView(frozen: frozen, scrolling: scrolling)
             let window = NSWindow(contentRect: bounds, styleMask: .borderless, backing: .buffered, defer: false)
@@ -610,24 +650,43 @@ enum SelfTest {
             view.frame = bounds
             window.contentView = view
             var actions: [ShotAction] = []
-            view.onAction = { _, action in actions.append(action) }
-            view.onEditedAction = { _, action in actions.append(action) }
+            var exportedImage: NSImage?
+            view.onAction = { rect, action in
+                actions.append(action)
+                if action == .copy {
+                    guard let crop = ScreenshotCapture.crop(globalRect: rect, from: [frozen]) else {
+                        print("[selectiontest] FAIL: copy did not receive the selected crop")
+                        exit(34)
+                    }
+                    let result = NSImage(cgImage: crop, size: rect.size)
+                    exportedImage = result
+                    ScreenshotFileIO.copyToClipboard(image: result, pasteboard: pasteboard)
+                }
+            }
+            view.onEditedAction = { image, action in
+                actions.append(action)
+                if action == .copy {
+                    exportedImage = image
+                    ScreenshotFileIO.copyToClipboard(image: image, pasteboard: pasteboard)
+                }
+            }
 
             func event(_ type: NSEvent.EventType, _ point: CGPoint, clicks: Int = 1) -> NSEvent {
                 NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
                                    windowNumber: window.windowNumber, context: nil, eventNumber: 0,
                                    clickCount: clicks, pressure: 1)!
             }
+            let dispatch = eventRouter(for: view)
             func click(_ point: CGPoint, clicks: Int = 1) {
-                let target = view.hitTest(point) ?? view
-                target.mouseDown(with: event(.leftMouseDown, point, clicks: clicks))
-                target.mouseUp(with: event(.leftMouseUp, point, clicks: clicks))
+                if clicks >= 2 { click(point, clicks: 1) }
+                dispatch(event(.leftMouseDown, point, clicks: clicks))
+                dispatch(event(.leftMouseUp, point, clicks: clicks))
             }
             func drag(_ start: CGPoint, to end: CGPoint, clicks: Int = 1) {
-                let target = view.hitTest(start) ?? view
-                target.mouseDown(with: event(.leftMouseDown, start, clicks: clicks))
-                target.mouseDragged(with: event(.leftMouseDragged, end, clicks: clicks))
-                target.mouseUp(with: event(.leftMouseUp, end, clicks: clicks))
+                if clicks >= 2 { click(start, clicks: 1) }
+                dispatch(event(.leftMouseDown, start, clicks: clicks))
+                dispatch(event(.leftMouseDragged, end, clicks: clicks))
+                dispatch(event(.leftMouseUp, end, clicks: clicks))
             }
             guard view.cursor(at: CGPoint(x: 50, y: 700)) === ShotSelectionCursor.cursor else {
                 print("[selectiontest] FAIL: initial selection must retain the selection cursor")
@@ -636,9 +695,7 @@ enum SelfTest {
             if autoSelection {
                 view.adoptAutoSelection(globalRect: CGRect(x: 200, y: 200, width: 400, height: 300), lock: true)
             } else {
-                view.mouseDown(with: event(.leftMouseDown, CGPoint(x: 200, y: 200)))
-                view.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: 600, y: 500)))
-                view.mouseUp(with: event(.leftMouseUp, CGPoint(x: 600, y: 500)))
+                drag(CGPoint(x: 200, y: 200), to: CGPoint(x: 600, y: 500))
             }
             guard let toolbar = view.subviews.compactMap({ $0 as? ShotToolbarView }).first else {
                 print("[selectiontest] FAIL: selection did not enter editing")
@@ -662,8 +719,9 @@ enum SelfTest {
                 // Auto-selection already displays the editing toolbar; users
                 // must be able to leave before their first confirmation click.
                 click(outsidePoint, clicks: 2)
-                guard actions.count == 1, actions.first == .cancel else {
-                    print("[selectiontest] FAIL: outside double-click must cancel an uncommitted auto-selection")
+                guard actions == [.copy], let copied = exportedImage,
+                      copied.size == NSSize(width: 400, height: 300), clipboardMatches(copied) else {
+                    print("[selectiontest] FAIL: outside double-click must copy an uncommitted auto-selection")
                     exit(26)
                 }
                 actions.removeAll()
@@ -671,6 +729,7 @@ enum SelfTest {
             let editor = view.subviews.compactMap { $0 as? AnnotationEditorView }.first
             let originalCrop = editor?.cropRect
             if let editor {
+                let plainPixels = pixels(editor.flattenedImage())
                 editor.currentTool = .rect
                 guard view.cursor(at: insidePoint) == NSCursor.crosshair,
                       view.cursor(at: outsidePoint) === ShotSelectionCursor.outsideCursor else {
@@ -678,12 +737,23 @@ enum SelfTest {
                     exit(24)
                 }
                 drag(CGPoint(x: 250, y: 300), to: CGPoint(x: 330, y: 340))
+                let rectanglePixels = pixels(editor.flattenedImage())
                 editor.currentTool = .arrow
                 drag(CGPoint(x: 400, y: 420), to: CGPoint(x: 500, y: 460))
                 guard editor.shapes.count == 2 else {
                     print("[selectiontest] FAIL: rectangle and arrow gestures must create annotations")
                     exit(18)
                 }
+                click(outsidePoint, clicks: 2)
+                guard actions == [.copy], let copied = exportedImage,
+                      copied.size == NSSize(width: 400, height: 300), clipboardMatches(copied),
+                      pixels(copied) == pixels(editor.flattenedImage()),
+                      rectanglePixels != plainPixels, pixels(copied) != rectanglePixels else {
+                    print("[selectiontest] FAIL: outside copy must preserve rectangle and arrow pixels")
+                    exit(35)
+                }
+                actions.removeAll()
+                exportedImage = nil
             }
             click(outsidePoint)
             drag(outsidePoint, to: CGPoint(x: 55, y: 705))
@@ -694,18 +764,52 @@ enum SelfTest {
                 print("[selectiontest] FAIL: blank click discarded screenshot editing (scrolling=\(scrolling), autoSelection=\(autoSelection))")
                 exit(15)
             }
+            for end in [CGPoint(x: 150, y: 700), CGPoint(x: 50, y: 600)] {
+                drag(outsidePoint, to: end, clicks: 2)
+                guard actions.isEmpty, toolbar.superview === view, !toolbar.isHidden,
+                      scrolling || editor?.cropRect == originalCrop else {
+                    print("[selectiontest] FAIL: horizontal/vertical double-click-count drag must not copy or discard selection")
+                    exit(45)
+                }
+            }
             guard view.cursor(at: edgePoint) == NSCursor.resizeLeftRight else {
                 print("[selectiontest] FAIL: committed selection must expose resize cursor")
                 exit(25)
             }
+            if let editor {
+                for tool in [ShapeTool.rect, .arrow] {
+                    editor.currentTool = tool
+                    let originalShapeCount = editor.shapes.count
+                    let start = tool == .rect ? CGPoint(x: 520, y: 280) : CGPoint(x: 360, y: 260)
+                    let end = tool == .rect ? CGPoint(x: 560, y: 320) : CGPoint(x: 430, y: 300)
+                    drag(start, to: end, clicks: 2)
+                    guard actions.isEmpty, editor.shapes.count == originalShapeCount + 1 else {
+                        print("[selectiontest] FAIL: double-click-count \(tool) drag must draw without copying")
+                        exit(42)
+                    }
+                    click(insidePoint, clicks: 2)
+                    guard actions == [.copy], let copied = exportedImage, clipboardMatches(copied),
+                          editor.shapes.count == originalShapeCount + 1,
+                          pixels(copied) == pixels(editor.flattenedImage()) else {
+                        print("[selectiontest] FAIL: interior double-click with \(tool) active must copy once")
+                        exit(43)
+                    }
+                    actions.removeAll()
+                }
+            }
             editor?.currentTool = nil
             click(insidePoint, clicks: 2)
+            guard actions == [.copy], let copiedInside = exportedImage, clipboardMatches(copiedInside) else {
+                print("[selectiontest] FAIL: interior double-click with no active tool must copy once")
+                exit(44)
+            }
+            actions.removeAll()
             click(edgePoint, clicks: 2)
-            view.mouseDown(with: event(.leftMouseDown, insidePoint, clicks: 2))
-            view.mouseUp(with: event(.leftMouseUp, outsidePoint, clicks: 2))
+            dispatch(event(.leftMouseDown, insidePoint, clicks: 2))
+            dispatch(event(.leftMouseUp, outsidePoint, clicks: 2))
             view.rightMouseDown(with: event(.rightMouseDown, outsidePoint))
             guard actions.isEmpty, toolbar.superview === view, !toolbar.isHidden else {
-                print("[selectiontest] FAIL: interior/resize-edge double-click or right-click finished or cancelled screenshot (scrolling=\(scrolling))")
+                print("[selectiontest] FAIL: resize-edge double-click, outside mouse release or right-click finished or cancelled screenshot (scrolling=\(scrolling))")
                 exit(16)
             }
             // A deliberate new selection still works after the ignored clicks.
@@ -717,30 +821,40 @@ enum SelfTest {
                 exit(19)
             }
             if let newEditor {
-                newEditor.currentTool = .text
-                click(CGPoint(x: 700, y: 640))
-                guard let textField = newEditor.subviews.compactMap({ $0 as? NSTextField }).first else {
-                    print("[selectiontest] FAIL: text gesture must begin an inline input field")
-                    exit(29)
+                for (label, textPoint, finishPoint) in [
+                    ("outside", CGPoint(x: 700, y: 640), outsidePoint),
+                    ("inside", CGPoint(x: 700, y: 600), CGPoint(x: 680, y: 690))
+                ] {
+                    let withoutText = pixels(newEditor.flattenedImage())
+                    newEditor.currentTool = .text
+                    click(textPoint)
+                    guard let textField = newEditor.subviews.compactMap({ $0 as? NSTextField }).first else {
+                        print("[selectiontest] FAIL: text gesture must begin an inline input field")
+                        exit(29)
+                    }
+                    let pendingText = "文字输入回归-" + label
+                    textField.stringValue = pendingText
+                    let fieldPoint = textField.convert(CGPoint(x: textField.bounds.midX,
+                                                                y: textField.bounds.midY), to: view)
+                    let fieldTarget = view.hitTest(fieldPoint)
+                    guard fieldTarget === textField || fieldTarget?.isDescendant(of: textField) == true else {
+                        print("[selectiontest] FAIL: inline text field must remain clickable")
+                        exit(30)
+                    }
+                    guard newEditor.hitTest(outsidePoint) == nil, view.hitTest(outsidePoint) === view else {
+                        print("[selectiontest] FAIL: active inline text field swallowed an outside click")
+                        exit(31)
+                    }
+                    click(finishPoint, clicks: 2)
+                    guard actions == [.copy], let copied = exportedImage,
+                          copied.size == NSSize(width: 250, height: 170), clipboardMatches(copied),
+                          newEditor.shapes.contains(where: { $0.tool == .text && $0.text == pendingText }),
+                          pixels(copied) != withoutText else {
+                        print("[selectiontest] FAIL: \(label) double-click must copy pending inline text pixels")
+                        exit(32)
+                    }
+                    actions.removeAll()
                 }
-                textField.stringValue = "文字输入回归"
-                let fieldPoint = textField.convert(CGPoint(x: textField.bounds.midX,
-                                                            y: textField.bounds.midY), to: view)
-                let fieldTarget = view.hitTest(fieldPoint)
-                guard fieldTarget === textField || fieldTarget?.isDescendant(of: textField) == true else {
-                    print("[selectiontest] FAIL: inline text field must remain clickable")
-                    exit(30)
-                }
-                guard newEditor.hitTest(outsidePoint) == nil, view.hitTest(outsidePoint) === view else {
-                    print("[selectiontest] FAIL: active inline text field swallowed an outside click")
-                    exit(31)
-                }
-                click(outsidePoint, clicks: 2)
-                guard actions.count == 1, actions.first == .cancel else {
-                    print("[selectiontest] FAIL: outside double-click must cancel during inline text editing")
-                    exit(32)
-                }
-                actions.removeAll()
             }
             let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                          windowNumber: window.windowNumber, context: nil, characters: "\r",
@@ -752,31 +866,224 @@ enum SelfTest {
             }
             actions.removeAll()
             click(outsidePoint, clicks: 2)
-            guard actions.count == 1, actions.first == .cancel else {
-                print("[selectiontest] FAIL: outside double-click must cancel exactly once (scrolling=\(scrolling), autoSelection=\(autoSelection))")
+            guard actions.count == 1, actions.first == .copy else {
+                print("[selectiontest] FAIL: outside double-click must copy exactly once (scrolling=\(scrolling), autoSelection=\(autoSelection))")
                 exit(23)
             }
             actions.removeAll()
             let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                           windowNumber: window.windowNumber, context: nil, characters: "\u{1b}",
                                           charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+            let clipboardVersion = pasteboard.changeCount
             view.keyDown(with: escape)
-            guard actions.count == 1, actions.first == .cancel else {
+            guard actions == [.cancel], pasteboard.changeCount == clipboardVersion else {
                 print("[selectiontest] FAIL: explicit Escape must still cancel")
                 exit(17)
             }
             window.close()
         }
 
-        // A second display has no local crop, but it is still outside the
-        // screenshot selected on the first display and follows the same rules.
+        // Real double-clicks arrive as a complete first click followed by the
+        // second press/release. Text creates a child field on the first click;
+        // the window-level route must still see the second click in that field.
+        for (tool, pendingText, textBeforeMarker) in [(ShapeTool.text, "", ""), (.marker, "", ""),
+                                                       (.text, "文字双击回归", ""), (.marker, "标号双击回归", ""),
+                                                       (.marker, "", "切换工具前的文字")] {
+            let view = ShotOverlayView(frozen: frozen, scrolling: false)
+            let window = NSWindow(contentRect: bounds, styleMask: .borderless, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            view.frame = bounds
+            window.contentView = view
+            let selectedRect = CGRect(x: 200, y: 200, width: 400, height: 300)
+            view.adoptAutoSelection(globalRect: selectedRect, lock: true)
+            guard let editor = view.subviews.compactMap({ $0 as? AnnotationEditorView }).first else {
+                print("[selectiontest] FAIL: missing editor for real double-click sequence")
+                exit(46)
+            }
+            var actions: [ShotAction] = []
+            var exportedImage: NSImage?
+            view.onAction = { rect, action in
+                actions.append(action)
+                if action == .copy, let crop = ScreenshotCapture.crop(globalRect: rect, from: [frozen]) {
+                    let result = NSImage(cgImage: crop, size: rect.size)
+                    exportedImage = result
+                    ScreenshotFileIO.copyToClipboard(image: result, pasteboard: pasteboard)
+                }
+            }
+            view.onEditedAction = { image, action in
+                actions.append(action)
+                if action == .copy {
+                    exportedImage = image
+                    ScreenshotFileIO.copyToClipboard(image: image, pasteboard: pasteboard)
+                }
+            }
+            let dispatch = eventRouter(for: view)
+            func click(_ point: CGPoint, clicks: Int) {
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    dispatch(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                               timestamp: 0, windowNumber: window.windowNumber,
+                                               context: nil, eventNumber: 0, clickCount: clicks, pressure: 1)!)
+                }
+            }
+            // A newly opened overlay can inherit clickCount=2 from the
+            // menu click that launched it. Without a first click in this
+            // overlay, those events must not complete the screenshot.
+            for point in [CGPoint(x: 80, y: 700), CGPoint(x: 400, y: 350)] {
+                click(point, clicks: 2)
+                guard actions.isEmpty, editor.shapes.isEmpty, view.hasLockedSelection else {
+                    print("[selectiontest] FAIL: inherited initial clickCount=2 must not copy or exit")
+                    exit(51)
+                }
+            }
+            editor.currentTool = tool
+            if tool == .marker {
+                click(CGPoint(x: 500, y: 300), clicks: 1)
+                guard let existingCaption = editor.subviews.compactMap({ $0 as? NSTextField }).first else {
+                    print("[selectiontest] FAIL: missing existing marker caption")
+                    exit(47)
+                }
+                existingCaption.stringValue = "已有标号"
+                editor.commitTextField()
+            }
+            let initialShapeCount = editor.shapes.count
+            let initialPixels = pixels(editor.flattenedImage())
+            if !textBeforeMarker.isEmpty {
+                editor.currentTool = .text
+                click(CGPoint(x: 280, y: 470), clicks: 1)
+                guard let pendingField = editor.subviews.compactMap({ $0 as? NSTextField }).first else {
+                    print("[selectiontest] FAIL: missing pending text before switching to marker")
+                    exit(52)
+                }
+                pendingField.stringValue = textBeforeMarker
+                editor.currentTool = .marker
+            }
+            let firstPoint = CGPoint(x: 320, y: 380)
+            let secondPoint = CGPoint(x: 323, y: 377)
+            click(firstPoint, clicks: 1)
+            guard let field = editor.subviews.compactMap({ $0 as? NSTextField }).first else {
+                print("[selectiontest] FAIL: first \(tool) click must begin inline editing")
+                exit(48)
+            }
+            field.stringValue = pendingText
+            if tool == .text {
+                let target = view.hitTest(secondPoint)
+                guard target === field || target?.isDescendant(of: field) == true else {
+                    print("[selectiontest] FAIL: real second click must target the newly created text field")
+                    exit(49)
+                }
+            }
+            click(secondPoint, clicks: 2)
+            let expectedShapeCount = initialShapeCount + (pendingText.isEmpty ? 0 : 1)
+                + (textBeforeMarker.isEmpty ? 0 : 1)
+            guard actions == [.copy], let copied = exportedImage, clipboardMatches(copied),
+                  copied.size == selectedRect.size, editor.shapes.count == expectedShapeCount,
+                  pendingText.isEmpty || (editor.shapes.contains(where: { $0.text == pendingText }) &&
+                                          pixels(copied) != initialPixels),
+                  textBeforeMarker.isEmpty || (editor.shapes.contains(where: { $0.tool == .text && $0.text == textBeforeMarker }) &&
+                                               pixels(copied) != initialPixels),
+                  tool != .marker || editor.shapes.contains(where: { $0.tool == .marker && $0.text == "已有标号" }) else {
+                print("[selectiontest] FAIL: real \(tool) double-click must copy once, preserve pending text/existing markers, and add no empty annotation")
+                exit(50)
+            }
+            window.close()
+        }
+
+        // ESC must cancel immediately even when an annotation tool or AppKit's
+        // inline text field owns first responder, without changing clipboard.
+        let escapeCases: [(String, ShapeTool?, Bool)] = [
+            ("idle", nil, false), ("rectangle", .rect, false), ("arrow", .arrow, false),
+            ("text canvas", .text, false), ("text field", .text, true),
+            ("marker caption", .marker, true)
+        ]
+        for (label, tool, useFieldDelegate) in escapeCases {
+            let view = ShotOverlayView(frozen: frozen, scrolling: false)
+            let window = NSWindow(contentRect: bounds, styleMask: .borderless, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            view.frame = bounds
+            window.contentView = view
+            view.adoptAutoSelection(globalRect: CGRect(x: 200, y: 200, width: 400, height: 300), lock: true)
+            guard let editor = view.subviews.compactMap({ $0 as? AnnotationEditorView }).first else {
+                print("[selectiontest] FAIL: missing editor for Escape case \(label)")
+                exit(36)
+            }
+            var actions: [ShotAction] = []
+            view.onAction = { _, action in actions.append(action) }
+            view.onEditedAction = { image, action in
+                actions.append(action)
+                if action == .copy { ScreenshotFileIO.copyToClipboard(image: image, pasteboard: pasteboard) }
+            }
+            editor.currentTool = tool
+            if tool == .text || tool == .marker {
+                let point = editor.convert(CGPoint(x: 300, y: 350), to: nil)
+                let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                                               timestamp: 0, windowNumber: window.windowNumber,
+                                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                editor.mouseDown(with: event)
+                guard let field = editor.subviews.compactMap({ $0 as? NSTextField }).first else {
+                    print("[selectiontest] FAIL: missing pending text for Escape case \(label)")
+                    exit(37)
+                }
+                field.stringValue = "应放弃的未提交文字"
+            }
+            pasteboard.clearContents()
+            pasteboard.setString("preserve existing clipboard", forType: .string)
+            let clipboardVersion = pasteboard.changeCount
+            if useFieldDelegate {
+                guard let field = editor.subviews.compactMap({ $0 as? NSTextField }).first,
+                      field.delegate === editor,
+                      let fieldEditor = window.fieldEditor(true, for: field) as? NSTextView,
+                      field.delegate?.control?(field, textView: fieldEditor,
+                                               doCommandBy: #selector(NSResponder.cancelOperation(_:))) == true else {
+                    print("[selectiontest] FAIL: inline field did not handle Escape for \(label)")
+                    exit(38)
+                }
+            } else {
+                let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                              windowNumber: window.windowNumber, context: nil, characters: "\u{1b}",
+                                              charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+                editor.keyDown(with: escape)
+            }
+            guard actions == [.cancel], pasteboard.changeCount == clipboardVersion,
+                  pasteboard.string(forType: .string) == "preserve existing clipboard" else {
+                print("[selectiontest] FAIL: Escape must cancel once and preserve clipboard for \(label)")
+                exit(39)
+            }
+            window.close()
+        }
+
+        // A double-click on the other display must export the actual selected
+        // display's crop. Merely emitting `.copy` from the blank display could
+        // accidentally capture the entire wrong monitor.
+        let selectedDisplay = ShotOverlayView(frozen: frozen, scrolling: false)
+        let selectedWindow = NSWindow(contentRect: bounds, styleMask: .borderless,
+                                      backing: .buffered, defer: false)
+        selectedWindow.isReleasedWhenClosed = false
+        selectedDisplay.frame = bounds
+        selectedWindow.contentView = selectedDisplay
+        let selectedRect = CGRect(x: 200, y: 200, width: 400, height: 300)
+        selectedDisplay.adoptAutoSelection(globalRect: selectedRect, lock: true)
+        var selectedActions: [ShotAction] = []
+        var copiedRect: CGRect?
+        selectedDisplay.onAction = { rect, action in
+            selectedActions.append(action)
+            if action == .copy {
+                copiedRect = rect
+                guard let crop = ScreenshotCapture.crop(globalRect: rect, from: [frozen]) else {
+                    print("[selectiontest] FAIL: cross-display copy lost selected crop")
+                    exit(40)
+                }
+                ScreenshotFileIO.copyToClipboard(image: NSImage(cgImage: crop, size: rect.size),
+                                                 pasteboard: pasteboard)
+            }
+        }
         let otherDisplay = ShotOverlayView(frozen: frozen, scrolling: false)
         let otherWindow = NSWindow(contentRect: bounds, styleMask: .borderless,
                                    backing: .buffered, defer: false)
         otherWindow.isReleasedWhenClosed = false
         otherDisplay.frame = bounds
         otherWindow.contentView = otherDisplay
-        otherDisplay.hasSelectionInSession = { true }
+        otherDisplay.hasSelectionInSession = { selectedDisplay.hasLockedSelection }
+        otherDisplay.onCopySelectionInSession = { selectedDisplay.copySelectionAndExit() }
         var otherActions: [ShotAction] = []
         otherDisplay.onAction = { _, action in otherActions.append(action) }
         let blank = CGPoint(x: 50, y: 700)
@@ -785,22 +1092,30 @@ enum SelfTest {
             print("[selectiontest] FAIL: other display must show outside cursor for the session selection")
             exit(27)
         }
+        let dispatchOther = eventRouter(for: otherDisplay)
         for clicks in [1, 2] {
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 let event = NSEvent.mouseEvent(with: type, location: blank, modifierFlags: [],
                                                timestamp: 0, windowNumber: otherWindow.windowNumber,
                                                context: nil, eventNumber: 0, clickCount: clicks,
                                                pressure: 1)!
-                if type == .leftMouseDown { otherDisplay.mouseDown(with: event) }
-                else { otherDisplay.mouseUp(with: event) }
+                dispatchOther(event)
             }
-            guard otherActions == (clicks == 1 ? [] : [.cancel]),
+            guard otherActions.isEmpty, selectedActions == (clicks == 1 ? [] : [.copy]),
                   otherDisplay.cursor(at: blank) === ShotSelectionCursor.outsideCursor else {
-                print("[selectiontest] FAIL: other display blank click must preserve, double-click must cancel")
+                print("[selectiontest] FAIL: other display blank click must preserve, double-click must copy selected display")
                 exit(28)
             }
         }
+        guard copiedRect == selectedRect, let copied = NSImage(pasteboard: pasteboard),
+              let expected = ScreenshotCapture.crop(globalRect: selectedRect, from: [frozen]),
+              copied.size == selectedRect.size,
+              pixels(copied) == pixels(NSImage(cgImage: expected, size: selectedRect.size)) else {
+            print("[selectiontest] FAIL: cross-display clipboard contains the wrong crop")
+            exit(41)
+        }
         otherWindow.close()
+        selectedWindow.close()
     }
 
     /// Deterministic synthetic page: horizontal bands filled with
