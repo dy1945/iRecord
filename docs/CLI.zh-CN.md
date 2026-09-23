@@ -52,6 +52,28 @@ irecord stop --session-id SESSION --crop-points 87,0,0,0 --json
 
 Agent 在开录前必须先调用 `windows preview` 并实际检查 PNG 画面，不能只依赖应用名或窗口标题。浏览器可能存在后台标签页或同应用的其他窗口；预览不符合目标页面时，不得开始录制。
 
+## Agent 截取浏览器页面
+
+`preview` 会把指定窗口的当前画面保存为 PNG，也可用于一次性截屏。下面的命令展示 Agent 从发现 CLI 到生成无地址栏图片的完整顺序：
+
+```bash
+CLI="$(command -v irecord || true)"
+if [ -z "$CLI" ]; then CLI=/Applications/iRecord.app/Contents/Helpers/irecord; fi
+"$CLI" -h
+"$CLI" status --json
+"$CLI" ls --search Chrome --json
+
+# Agent 从 windows 中核对 app、title，选出目标 window_id；不要猜固定 ID。
+"$CLI" preview --window-id "$WINDOW_ID" --output /tmp/browser-full.png --json
+# Agent 实际查看完整 PNG，确认页面正确，测量浏览器顶部栏高度。
+"$CLI" preview --window-id "$WINDOW_ID" --output /tmp/browser-page.png \
+  --crop-points "$TOP_POINTS,0,0,0" --json
+```
+
+`--crop-points` 顺序是「上、右、下、左」，单位为窗口逻辑点；CLI 会换算 Retina 像素。可先在浏览器页面读取 `window.outerHeight - window.innerHeight` 作为 `TOP_POINTS` 的起点，再检查最终 PNG 是否完全去掉标签页和 URL 栏、且没有裁掉页面正文。不同浏览器和窗口样式的高度不同，不能固定写死 `87`。若已知原始图片像素，也可使用 `--crop-insets`；两种裁剪参数不能同时使用。`preview` 默认拒绝覆盖已有图片，请为每次任务使用新路径。
+
+当前 CLI 仅录制指定**窗口**，不采集屏幕上的点击高亮浮层，因此没有 `--highlight-clicks` 参数；即使 App 开启该设置，CLI 窗口视频也不会包含点击涟漪。需要展示点击效果时，应使用 App 的区域或整屏录制。
+
 `start` 在采集进入 recording 状态后返回。Agent 应在可见操作前 `start`/`resume`，在模型生成、下载或人工等待前 `pause`，结果出现后再 `resume`。`stop` 等待文件收尾及导出完成，返回 `output`、`duration_seconds`、实际输出 `width`、`height`。CLI 创建的录屏不打开视频预览；普通 GUI 录屏仍使用预览流程。在 GUI 中停止 CLI 录屏后，可再调用 CLI stop 导出。重复 stop 同一已导出会话返回原结果。
 
 交付前必须运行 `scripts/validate_cli_recording.sh <video> <App录制目录> [max-edge]`。它会同时检查保存目录、输出尺寸和画面是否有有效场景变化；只检查 MP4 可打开或存在 H.264 流不算通过。

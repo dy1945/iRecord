@@ -1,5 +1,6 @@
 import XCTest
 import Darwin
+import CoreGraphics
 @testable import ControlProtocol
 
 final class ControlProtocolTests: XCTestCase {
@@ -26,6 +27,38 @@ final class ControlProtocolTests: XCTestCase {
             sourceSize: CGSize(width: 3350, height: 2158),
             windowSize: CGSize(width: 1675, height: 1079)),
             .init(top: 174, right: 0, bottom: 0, left: 0))
+    }
+
+    func testPreviewCropRemovesFullBrowserChromeAtRetinaScale() {
+        let points = RecordingExportPolicy.CropInsets(top: 87.25, right: 0, bottom: 0, left: 0)
+        let pixels = RecordingExportPolicy.pixelInsets(
+            from: points, sourceSize: CGSize(width: 3350, height: 2158),
+            windowSize: CGSize(width: 1675, height: 1079))!
+        XCTAssertEqual(RecordingExportPolicy.pixelAlignedCropRect(
+            CGSize(width: 3350, height: 2158), insets: pixels),
+            CGRect(x: 0, y: 175, width: 3350, height: 1983))
+        XCTAssertNil(RecordingExportPolicy.pixelAlignedCropRect(
+            CGSize(width: 100, height: 100),
+            insets: .init(top: 99, right: 0, bottom: 0, left: 0)))
+
+        // The first two rows represent browser chrome; the remaining rows
+        // represent page pixels. Verify CGImage's crop origin removes the top.
+        let bytes = Data(Array(repeating: UInt8(16), count: 8)
+                         + Array(repeating: UInt8(224), count: 8))
+        let gray = CGColorSpaceCreateDeviceGray()
+        let image = CGImage(width: 4, height: 4, bitsPerComponent: 8, bitsPerPixel: 8,
+                            bytesPerRow: 4, space: gray, bitmapInfo: CGBitmapInfo(),
+                            provider: CGDataProvider(data: bytes as CFData)!, decode: nil,
+                            shouldInterpolate: false, intent: .defaultIntent)!
+        let rect = RecordingExportPolicy.pixelAlignedCropRect(
+            CGSize(width: 4, height: 4),
+            insets: .init(top: 2, right: 0, bottom: 0, left: 0))!
+        let cropped = image.cropping(to: rect)!
+        let context = CGContext(data: nil, width: 4, height: 2, bitsPerComponent: 8,
+                                bytesPerRow: 4, space: gray, bitmapInfo: CGBitmapInfo(rawValue: 0))!
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: 4, height: 2))
+        let output = context.data!.assumingMemoryBound(to: UInt8.self)
+        XCTAssertTrue((0..<8).allSatisfy { output[$0] == 224 })
     }
 
     func testMultiChunkRequestAndReply() throws {

@@ -13,7 +13,7 @@ Commands:
   status                         查看 App、权限和录制状态
   permission                     请求屏幕录制权限
   ls [--search TEXT]             查找可录制窗口
-  preview --window-id ID         预览目标窗口（需 --output PNG）
+  preview --window-id ID         截取目标窗口 PNG（需 --output）
   start --window-id ID           开始窗口录制
   pause --session-id ID          暂停录制
   resume --session-id ID         继续录制
@@ -21,10 +21,12 @@ Commands:
   install                        安装 ~/.local/bin/irecord
   uninstall                      移除 CLI，保留 App 和录屏
 
+Preview / stop crop options:
+  --crop-points T,R,B,L          按窗口逻辑点裁剪（浏览器推荐）
+  --crop-insets T,R,B,L          按原始像素裁剪上、右、下、左
+
 Stop options:
   --output PATH                  指定 MP4、MOV 或 GIF 输出路径
-  --crop-insets T,R,B,L          按原始像素裁剪上、右、下、左
-  --crop-points T,R,B,L          按窗口逻辑点裁剪（浏览器推荐）
   --max-edge PIXELS              最长边，默认 1920；0 保留原尺寸
   --overwrite                    允许覆盖已有文件
 
@@ -34,7 +36,7 @@ Global options:
 
 Examples:
   irecord ls --search Chrome --json
-  irecord preview --window-id 311 --output /tmp/window.png --json
+  irecord preview --window-id 311 --output /tmp/window.png --crop-points 87,0,0,0 --json
   irecord start --window-id 311 --json
   irecord pause --session-id SESSION --json
   irecord resume --session-id SESSION --json
@@ -82,7 +84,7 @@ let aliases = [
 ]
 let command = aliases[enteredCommand] ?? enteredCommand
 let allowed: [String: Set<String>] = ["status": [], "permission request": [], "windows list": ["search"],
-    "windows preview": ["window-id", "output"], "recording start": ["window-id"],
+    "windows preview": ["window-id", "output", "crop-insets", "crop-points"], "recording start": ["window-id"],
     "recording stop": ["session-id", "output", "max-edge", "crop-insets", "crop-points", "overwrite"],
     "recording pause": ["session-id"], "recording resume": ["session-id"], "install": [], "uninstall": []]
 guard let keys = allowed[command], Set(options.keys).subtracting(["json"]).isSubset(of: keys) else {

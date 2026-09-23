@@ -36,6 +36,15 @@ irecord stop --session-id ID --json
 
 录屏沿用 App 的保存设置；可用 `--crop-points` 裁去浏览器地址栏、`--max-edge` 限制输出尺寸。详见 [命令行使用说明](docs/CLI.zh-CN.md)。
 
+Agent 也可以用 `preview` 截取单个浏览器窗口为 PNG。先用 `irecord ls --json` 找到正确的窗口 ID，保存一张完整预览并检查页面，再按窗口逻辑点裁掉顶部地址栏：
+
+```bash
+irecord preview --window-id ID --output /tmp/browser-full.png --json
+irecord preview --window-id ID --output /tmp/browser-page.png --crop-points 87,0,0,0 --json
+```
+
+`87` 只是示例。Agent 应根据实际浏览器窗口测量并复查最终图片；[完整调用流程](docs/CLI.zh-CN.md#agent-截取浏览器页面)也说明了如何找到 CLI。当前 CLI 窗口录屏不包含屏幕上的鼠标点击涟漪，未提供单独的点击效果参数。
+
 ## 从源码构建
 
 安装 Xcode Command Line Tools 后，在仓库根目录运行：

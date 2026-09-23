@@ -44,6 +44,18 @@ if not args.window_id:
     print('SKIP: real recording; pass --window-id ID to opt in')
     raise SystemExit(0)
 assert status['state'] == 'idle' and 'source_path' not in status, status
+with tempfile.TemporaryDirectory(prefix='irecord-preview-test-') as directory:
+    full = run('preview', '--window-id', args.window_id,
+               '--output', str(Path(directory) / 'full.png'))['values']
+    cropped = run('preview', '--window-id', args.window_id,
+                  '--output', str(Path(directory) / 'page.png'),
+                  '--crop-points', '10,0,0,0')['values']
+    assert cropped['crop_mode'] == 'points'
+    assert int(cropped['width']) == int(full['width'])
+    assert int(cropped['height']) < int(full['height'])
+    assert Path(full['output']).stat().st_size > 0
+    assert Path(cropped['output']).stat().st_size > 0
+    print('PASS: window PNG preview and point-based top crop')
 session = run('start', '--window-id', args.window_id)['values']
 sid = session['session_id']
 assert session['state'] == 'recording'

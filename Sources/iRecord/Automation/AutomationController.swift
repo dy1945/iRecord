@@ -117,16 +117,49 @@ final class AutomationController {
                 return ControlReply("window_not_found", "Refresh windows list and choose an on-screen window.")
             }
             guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, id,
-                                                       [.boundsIgnoreFraming, .bestResolution]),
-                  let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+                                                       [.boundsIgnoreFraming, .bestResolution]) else {
                 return ControlReply("preview_failed", "Could not capture this window preview.")
+            }
+            guard request.options["crop-points"] == nil || request.options["crop-insets"] == nil else {
+                return ControlReply("invalid_arguments", "Use either --crop-points or --crop-insets, not both.")
+            }
+            let sourceSize = CGSize(width: image.width, height: image.height)
+            var preview = image
+            var cropMode: String?
+            var appliedInsets: RecordingExportPolicy.CropInsets?
+            if let raw = request.options["crop-points"] ?? request.options["crop-insets"] {
+                guard let parsed = RecordingExportPolicy.CropInsets.parse(raw) else {
+                    return ControlReply("invalid_arguments", "Crop must be four non-negative values: top,right,bottom,left.")
+                }
+                let usesPoints = request.options["crop-points"] != nil
+                guard let pixels = usesPoints
+                        ? RecordingExportPolicy.pixelInsets(from: parsed, sourceSize: sourceSize,
+                                                            windowSize: window.frame.size)
+                        : parsed,
+                      let rect = RecordingExportPolicy.pixelAlignedCropRect(sourceSize, insets: pixels),
+                      let cropped = image.cropping(to: rect) else {
+                    return ControlReply("invalid_arguments", "Crop exceeds the captured window image.")
+                }
+                preview = cropped
+                cropMode = usesPoints ? "points" : "pixels"
+                appliedInsets = pixels
+            }
+            guard let data = NSBitmapImageRep(cgImage: preview).representation(using: .png, properties: [:]) else {
+                return ControlReply("preview_failed", "Could not encode this window preview.")
             }
             let destination = URL(fileURLWithPath: output)
             do {
                 try data.write(to: destination, options: .withoutOverwriting)
-                return ControlReply(values: ["output": output, "window_id": rawID,
-                                               "app": window.appName, "title": window.title,
-                                               "width": String(image.width), "height": String(image.height)])
+                var values = ["output": output, "window_id": rawID,
+                              "app": window.appName, "title": window.title,
+                              "width": String(preview.width), "height": String(preview.height)]
+                if let cropMode, let appliedInsets {
+                    values["crop_mode"] = cropMode
+                    values["crop_insets_pixels"] = [appliedInsets.top, appliedInsets.right,
+                                                     appliedInsets.bottom, appliedInsets.left]
+                        .map { String(Int(ceil($0))) }.joined(separator: ",")
+                }
+                return ControlReply(values: values)
             } catch {
                 return ControlReply("output_exists", "Preview output must not already exist: \(error.localizedDescription)")
             }

@@ -109,6 +109,15 @@ public enum RecordingExportPolicy {
         return CGRect(x: insets.left, y: insets.top, width: width, height: height)
     }
 
+    /// Crop image pixels without retaining any fraction of an excluded edge.
+    public static func pixelAlignedCropRect(_ size: CGSize, insets: CropInsets) -> CGRect? {
+        guard let rect = cropRect(size, insets: insets) else { return nil }
+        let left = ceil(rect.minX), top = ceil(rect.minY)
+        let right = floor(rect.maxX), bottom = floor(rect.maxY)
+        guard right - left >= 2, bottom - top >= 2 else { return nil }
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
+    }
+
     public static func pixelInsets(from points: CropInsets, sourceSize: CGSize,
                                    windowSize: CGSize) -> CropInsets? {
         guard sourceSize.width > 0, sourceSize.height > 0,
