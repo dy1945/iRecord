@@ -58,11 +58,11 @@ struct ControlPanelView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(nsImage: NSApp.applicationIconImage)
+            Image(nsImage: Self.headerIcon)
                 .resizable()
                 .interpolation(.high)
+                .scaledToFit()
                 .frame(width: 20, height: 20)
-                .clipShape(RoundedRectangle(cornerRadius: 5))
 
             HStack(alignment: .lastTextBaseline, spacing: 5) {
                 Text("iRecord")
@@ -83,6 +83,14 @@ struct ControlPanelView: View {
         .padding(.horizontal, 4)
         .padding(.bottom, 12)
     }
+
+    private static let headerIcon: NSImage = {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let image = NSImage(contentsOf: url) else {
+            return NSApp.applicationIconImage
+        }
+        return image
+    }()
 
     private var statusPill: some View {
         HStack(spacing: 5) {
