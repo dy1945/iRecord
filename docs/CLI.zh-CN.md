@@ -50,11 +50,11 @@ irecord stop --session-id SESSION --crop-points 87,0,0,0 --json
 
 当前版本支持窗口录制，沿用 App 的声音、鼠标、输出帧率、格式和保存目录设置。未指定 `--output` 时，会在 App 的录制目录中自动生成不重复的文件名。默认将长边限制到 1920 像素并保持比例；可用 `--max-edge 1280` 调低，或用 `--max-edge 0` 保留原始像素。已有文件默认拒绝，显式 `--overwrite` 才原子替换。
 
-Agent 在开录前必须先调用 `windows preview` 并实际检查 PNG 画面，不能只依赖应用名或窗口标题。浏览器可能存在后台标签页或同应用的其他窗口；预览不符合目标页面时，不得开始录制。
+Agent 在开录前必须先调用 `irecord preview` 并实际检查 PNG 画面，不能只依赖应用名或窗口标题。浏览器可能存在后台标签页或同应用的其他窗口；预览不符合目标页面时，不得开始录制。
 
-## Agent 截取浏览器页面
+## Agent 用 irecord 截取浏览器页面
 
-`preview` 会把指定窗口的当前画面保存为 PNG，也可用于一次性截屏。下面的命令展示 Agent 从发现 CLI 到生成无地址栏图片的完整顺序：
+`irecord` 的 `preview` 子命令会把指定窗口的当前画面保存为 PNG，也可用于一次性截屏。下面的命令展示 Agent 从找到 `irecord` 到生成无地址栏图片的完整顺序：
 
 ```bash
 CLI="$(command -v irecord || true)"
@@ -70,7 +70,7 @@ if [ -z "$CLI" ]; then CLI=/Applications/iRecord.app/Contents/Helpers/irecord; f
   --crop-points "$TOP_POINTS,0,0,0" --json
 ```
 
-`--crop-points` 顺序是「上、右、下、左」，单位为窗口逻辑点；CLI 会换算 Retina 像素。可先在浏览器页面读取 `window.outerHeight - window.innerHeight` 作为 `TOP_POINTS` 的起点，再检查最终 PNG 是否完全去掉标签页和 URL 栏、且没有裁掉页面正文。不同浏览器和窗口样式的高度不同，不能固定写死 `87`。若已知原始图片像素，也可使用 `--crop-insets`；两种裁剪参数不能同时使用。`preview` 默认拒绝覆盖已有图片，请为每次任务使用新路径。
+`--crop-points` 顺序是「上、右、下、左」，单位为窗口逻辑点；CLI 会换算 Retina 像素。可先在浏览器页面读取 `window.outerHeight - window.innerHeight` 作为 `TOP_POINTS` 的起点，再检查最终 PNG 是否完全去掉标签页和 URL 栏、且没有裁掉页面正文。不同浏览器和窗口样式的高度不同，不能固定写死 `87`。若已知原始图片像素，也可使用 `--crop-insets`；两种裁剪参数不能同时使用。`irecord preview` 默认拒绝覆盖已有图片，请为每次任务使用新路径。
 
 当前 CLI 仅录制指定**窗口**，不采集屏幕上的点击高亮浮层，因此没有 `--highlight-clicks` 参数；即使 App 开启该设置，CLI 窗口视频也不会包含点击涟漪。需要展示点击效果时，应使用 App 的区域或整屏录制。
 
