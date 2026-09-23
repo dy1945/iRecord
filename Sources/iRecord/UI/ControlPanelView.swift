@@ -47,6 +47,7 @@ struct ControlPanelView: View {
         }
         .padding(14)
         .frame(width: 372)
+        .background(theme.panelBackground)
         .onReceive(NotificationCenter.default.publisher(for: .iRecordShowWindowPicker)) { _ in
             guard !controller.isRecording else { return }
             openWindowPicker()
@@ -879,6 +880,7 @@ private struct FpsSegmented: View {
 
 /// Light/dark palette mirroring the design's `theme` dictionaries.
 struct PanelTheme {
+    let panelBackground: Color
     let textPrimary: Color
     let textSecondary: Color
     let textTertiary: Color
@@ -905,6 +907,7 @@ struct PanelTheme {
         }
         if dark {
             return PanelTheme(
+                panelBackground: c(38, 38, 40, 1.0),
                 textPrimary: c(255, 255, 255, 0.92),
                 textSecondary: c(235, 235, 245, 0.55),
                 textTertiary: c(235, 235, 245, 0.40),
@@ -926,6 +929,7 @@ struct PanelTheme {
                 toggleOffBorder: c(255, 255, 255, 0.10))
         } else {
             return PanelTheme(
+                panelBackground: c(247, 247, 249, 1.0),
                 textPrimary: c(29, 29, 31, 1.0),
                 textSecondary: c(0, 0, 0, 0.50),
                 textTertiary: c(0, 0, 0, 0.36),
