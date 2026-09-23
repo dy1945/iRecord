@@ -9,7 +9,7 @@ CLI 与 App 一起构建、签名和分发，路径为 `iRecord.app/Contents/Hel
 - 也可运行：`/Applications/iRecord.app/Contents/Helpers/irecord install`。
 - 开发部署：`./scripts/build_app.sh release` 后运行 `./scripts/install_app.sh`。
 - 安装器创建 `~/.local/bin/irecord` 链接，在 `.zprofile` 和现有 Bash 登录配置（默认 `.bash_profile`）添加带 iRecord 标记的 PATH 段。无需 sudo，不覆盖其他命令。打开新终端生效；当前终端可运行 `export PATH="$HOME/.local/bin:$PATH"`。Fish 等其他 shell 自行配置 PATH。
-- 在同一路径替换 App 后，命令链接自动使用新版。正在运行的旧 App 需退出后重开；安装器不强制结束录屏。移动 App 后重新安装链接。
+- 升级前，先结束录屏、保存预览并退出 iRecord；安装脚本会拒绝替换正在运行的 App，避免系统把权限关联到临时备份。安装完成后重新打开 App，同一路径下的命令链接自动使用新版。移动 App 后重新安装链接。
 - `irecord uninstall` 移除命令链接及 PATH 段，保留 App 和录像。删除 App 前先卸载 CLI。
 - App 未运行时，CLI 自动从所属 bundle 启动它；旧 App 已运行但不支持 CLI 时返回 `app_unavailable`，不会再启动一个实例。
 
