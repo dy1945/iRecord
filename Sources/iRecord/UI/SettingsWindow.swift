@@ -4,6 +4,8 @@ import Carbon.HIToolbox
 import ServiceManagement
 import Combine
 
+private let settingsContentSize = NSSize(width: 560, height: 430)
+
 /// Standalone settings window, per the 设置窗口 mockups: a standard titled
 /// window with five icon tabs (通用 / 录制 / 截图 / 保存 / 快捷键). Opened from
 /// the panel's gear button (last tab) or the Save-to screen's 更多设置… (.save).
@@ -16,14 +18,14 @@ final class SettingsWindowController: NSWindowController {
 
     private init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 556),
+            contentRect: NSRect(origin: .zero, size: settingsContentSize),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
         window.title = L10n.tr("Settings", "设置")
         window.isReleasedWhenClosed = false
-        window.center()
         super.init(window: window)
         window.contentViewController = NSHostingController(rootView: SettingsRootView(model: model))
+        window.center()
 
         // Keep the title bar in sync with UI-language switches.
         RecordingController.shared.$uiRefresh
@@ -37,6 +39,7 @@ final class SettingsWindowController: NSWindowController {
     /// Shows the window, optionally jumping straight to a tab.
     func show(tab: SettingsTab? = nil) {
         if let tab { model.tab = tab }
+        window?.center()
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -92,7 +95,7 @@ private struct SettingsRootView: View {
         VStack(spacing: 0) {
             tabBar
             Rectangle().fill(theme.separator).frame(height: 0.5)
-            ScrollView {
+            ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 14) {
                     switch model.tab {
                     case .general:    generalTab
@@ -105,7 +108,7 @@ private struct SettingsRootView: View {
                 .padding(14)
             }
         }
-        .frame(width: 560, height: 556)
+        .frame(width: settingsContentSize.width, height: settingsContentSize.height)
     }
 
     // MARK: Tab bar

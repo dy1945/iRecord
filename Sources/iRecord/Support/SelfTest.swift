@@ -16,6 +16,57 @@ import ScreenCaptureKit
 /// queue, so this test must keep the main run loop spinning (never block it) and
 /// call `exit()` from within a callback once finished.
 enum SelfTest {
+    /// Reproduces a second hotkey capture still pending when Escape closes the
+    /// first overlay. No display permission or synthetic input is needed.
+    @MainActor
+    static func runShotEscapeLifecycle() async -> Never {
+        let controller = ScreenshotController.shared
+        var pending: [CheckedContinuation<[ScreenshotCapture.FrozenDisplay], Error>] = []
+        var presentations = 0
+        let freeze: @MainActor () async throws -> [ScreenshotCapture.FrozenDisplay] = {
+            try await withCheckedThrowingContinuation { pending.append($0) }
+        }
+        let present: @MainActor ([ScreenshotCapture.FrozenDisplay], Bool) -> Void = { _, _ in
+            presentations += 1
+        }
+        let first = Task { await controller.beginOverlay(scrolling: false, freeze: freeze, present: present) }
+        let second = Task { await controller.beginOverlay(scrolling: false, freeze: freeze, present: present) }
+        for _ in 0..<100 where pending.isEmpty { await Task.yield() }
+        guard !pending.isEmpty else {
+            print("[shotescapetest] FAIL: first capture request did not reach freeze")
+            exit(40)
+        }
+        pending.removeFirst().resume(returning: [])
+        await first.value
+        guard presentations == 1 else {
+            print("[shotescapetest] FAIL: first overlay did not open")
+            exit(41)
+        }
+        ScreenshotOverlayController.shared.dismiss() // Escape's controller path
+        for continuation in pending { continuation.resume(returning: []) }
+        pending.removeAll()
+        await second.value
+        guard presentations == 1 else {
+            print("[shotescapetest] FAIL: Escape closed the first overlay, then a pending capture reopened it")
+            exit(42)
+        }
+        let pendingCapture = Task { await controller.beginOverlay(scrolling: false, freeze: freeze, present: present) }
+        for _ in 0..<100 where pending.isEmpty { await Task.yield() }
+        guard pending.count == 1 else {
+            print("[shotescapetest] FAIL: new capture did not reach freeze")
+            exit(43)
+        }
+        ScreenshotOverlayController.shared.dismiss()
+        pending.removeFirst().resume(returning: [])
+        await pendingCapture.value
+        guard presentations == 1 else {
+            print("[shotescapetest] FAIL: a capture completed after Escape reopened the overlay")
+            exit(44)
+        }
+        print("[shotescapetest] PASS: Escape cannot reveal a queued second screenshot")
+        exit(0)
+    }
+
     /// Exercises search and the actual preview close sheet against a disposable file.
     @MainActor
     static func runWindowFlow() -> Never {
@@ -687,6 +738,12 @@ enum SelfTest {
                 dispatch(event(.leftMouseDown, start, clicks: clicks))
                 dispatch(event(.leftMouseDragged, end, clicks: clicks))
                 dispatch(event(.leftMouseUp, end, clicks: clicks))
+            }
+            // A global shortcut opens this overlay while another app is key.
+            // AppKit must deliver the first press, or the first drag is lost.
+            guard view.acceptsFirstMouse(for: event(.leftMouseDown, CGPoint(x: 200, y: 200))) else {
+                print("[selectiontest] FAIL: first drag is swallowed while the overlay activates")
+                exit(38)
             }
             guard view.cursor(at: CGPoint(x: 50, y: 700)) === ShotSelectionCursor.cursor else {
                 print("[selectiontest] FAIL: initial selection must retain the selection cursor")

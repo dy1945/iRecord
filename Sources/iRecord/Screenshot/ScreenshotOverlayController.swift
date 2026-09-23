@@ -182,6 +182,15 @@ final class ScreenshotController {
     static let shared = ScreenshotController()
 
     private(set) var frozen: [ScreenshotCapture.FrozenDisplay] = []
+    private var captureInFlight = false
+    private var captureGeneration: UInt64 = 0
+
+    /// Escape/finish invalidates a freeze that has not returned yet as well as
+    /// the visible overlay. A late result must never reopen screenshot mode.
+    func cancelPendingCapture() {
+        captureGeneration &+= 1
+        captureInFlight = false
+    }
 
     /// Region screenshot (iShot ⇧A equivalent): freeze screen → select → toolbar.
     func startRegionCapture() {
@@ -223,16 +232,32 @@ final class ScreenshotController {
         }
     }
 
-    private func beginOverlay(scrolling: Bool) async {
+    func beginOverlay(
+        scrolling: Bool,
+        freeze: @MainActor () async throws -> [ScreenshotCapture.FrozenDisplay] = {
+            try await ScreenshotCapture.freezeDisplays()
+        },
+        present: @MainActor ([ScreenshotCapture.FrozenDisplay], Bool) -> Void = {
+            ScreenshotOverlayController.shared.begin(frozen: $0, scrolling: $1)
+        }
+    ) async {
+        guard !captureInFlight else { return }
+        captureInFlight = true
+        captureGeneration &+= 1
+        let generation = captureGeneration
         do {
-            frozen = try await ScreenshotCapture.freezeDisplays()
+            let result = try await freeze()
+            guard captureInFlight, captureGeneration == generation else { return }
+            frozen = result
         } catch {
+            guard captureGeneration == generation else { return }
+            captureInFlight = false
             NSLog("[shot] freezeDisplays failed: %@", error.localizedDescription)
             presentCaptureError(error)
             return
         }
         NSLog("[shot] overlay begin (scrolling=%d), frozen=%d", scrolling, frozen.count)
-        ScreenshotOverlayController.shared.begin(frozen: frozen, scrolling: scrolling)
+        present(frozen, scrolling)
     }
 
     private func presentCaptureError(_ error: Error) {
@@ -262,7 +287,7 @@ final class ScreenshotOverlayController {
     private weak var activeSelectionView: ShotOverlayView?
 
     func begin(frozen: [ScreenshotCapture.FrozenDisplay], scrolling: Bool) {
-        dismiss()
+        clearOverlay()
         self.frozen = frozen
         candidateWindows = Self.frontToBackWindowFrames()
         for d in frozen {
@@ -296,6 +321,11 @@ final class ScreenshotOverlayController {
     }
 
     func dismiss() {
+        clearOverlay()
+        ScreenshotController.shared.cancelPendingCapture()
+    }
+
+    private func clearOverlay() {
         ocrTask?.cancel()
         ocrTask = nil
         activeSelectionView = nil
@@ -459,6 +489,10 @@ private final class ShotOverlayWindow: NSWindow {
 // MARK: - View
 
 final class ShotOverlayView: NSView {
+    // The overlay is opened by a global hotkey while another app is active.
+    // Accept the activating click so its mouse-down can start the first drag.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     var screenGlobalFrame: CGRect = .zero
     var onAction: ((CGRect, ShotAction) -> Void)?
     var onEditedAction: ((NSImage, ShotAction) -> Void)?

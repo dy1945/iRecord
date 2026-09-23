@@ -65,6 +65,13 @@ struct iRecordMain {
             SelfTest.runShotSelectionGeometry()
         }
 
+        if CommandLine.arguments.contains("--shotescapetest") {
+            _ = NSApplication.shared
+            Task { @MainActor in await SelfTest.runShotEscapeLifecycle() }
+            NSApplication.shared.run()
+            exit(1)
+        }
+
         if CommandLine.arguments.contains("--shotoutputtest") {
             ScreenshotOutputSelfTest.run()
         }
