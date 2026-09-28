@@ -5,11 +5,17 @@ import Foundation
 /// approach: repeated captures of a fixed rect + template matching, so it works
 /// in any app — browsers, chat windows, documents).
 ///
-/// For each new frame we locate the previous accepted frame's bottom probe
-/// strip inside the new frame; the vertical shift `dy` tells us how far the
-/// content moved. The bottom `dy` pixels of the new frame are fresh content
-/// and get appended. Frames that can't be matched (too-fast scroll) are
-/// skipped — the next frame is matched against the last *accepted* one.
+/// For each new frame we locate the previous accepted frame's probe strip
+/// inside the new frame; the vertical shift `dy` tells us how far the content
+/// moved, and the rows it revealed get appended. Frames that can't be matched
+/// (too-fast scroll) are skipped — the next frame is matched against the last
+/// *accepted* one.
+///
+/// Sticky footers (chat input bars, bottom toolbars, cookie banners) are rows
+/// that stay identical while the content scrolls. They are kept out of the
+/// probe (otherwise they drag the match towards dy = 0) and out of the appended
+/// strips (otherwise they repeat every few hundred pixels); the footer of the
+/// last frame is added once at the very bottom of the result.
 final class ImageStitcher {
 
     struct MatchResult {
@@ -21,206 +27,290 @@ final class ImageStitcher {
 
     private let width: Int
     private let height: Int
+    private let bytesPerRow: Int
 
-    /// The growing stitched image, as a BGRA bitmap context.
-    private var canvas: CGContext
-    private var canvasHeight: Int
-    /// Luminance of the last accepted frame (== canvas bottom); kept so a
-    /// failed frame never poisons the next comparison.
-    private var prevGray: Gray
+    /// Stitched content so far, top-down BGRA rows (premultiplied-first,
+    /// 32-bit little endian). Appending is amortized O(strip), unlike redrawing
+    /// a taller CGContext for every frame.
+    private var pixels: [UInt8]
+    private var rowCount: Int
+    /// The last accepted frame (== bottom of the canvas).
+    private var prev: Frame
+    /// Rows [0, contentBottom) of `prev` are already in the canvas; the rows
+    /// below are the (possibly sticky) tail that is only added on output.
+    private var contentBottom: Int
     private(set) var frameCount = 0
 
     init?(firstFrame: CGImage) {
         width = firstFrame.width
         height = firstFrame.height
-        canvasHeight = height
-        guard let ctx = ImageStitcher.makeContext(width: width, height: height),
-              let gray = ImageStitcher.grayBuffer(firstFrame) else { return nil }
-        canvas = ctx
-        prevGray = gray
-        canvas.draw(firstFrame, in: CGRect(x: 0, y: 0, width: width, height: height))
+        bytesPerRow = width * 4
+        guard width > 16, height > 64,
+              let frame = ImageStitcher.decode(firstFrame) else { return nil }
+        prev = frame
+        pixels = frame.bgra
+        rowCount = height
+        contentBottom = height
         frameCount = 1
     }
 
-    var currentImage: CGImage? { canvas.makeImage() }
-    var stitchedHeight: Int { canvasHeight }
+    /// Stitched image including the sticky tail of the last frame.
+    var currentImage: CGImage? {
+        let tail = height - contentBottom
+        var data = Data(capacity: (rowCount + tail) * bytesPerRow)
+        pixels.withUnsafeBufferPointer { data.append($0.baseAddress!, count: rowCount * bytesPerRow) }
+        if tail > 0 {
+            prev.bgra.withUnsafeBufferPointer {
+                data.append($0.baseAddress! + contentBottom * bytesPerRow, count: tail * bytesPerRow)
+            }
+        }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(width: width, height: rowCount + tail,
+                       bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow,
+                       space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: ImageStitcher.bitmapInfo),
+                       provider: provider, decode: nil, shouldInterpolate: false,
+                       intent: .defaultIntent)
+    }
+
+    var stitchedHeight: Int { rowCount + height - contentBottom }
 
     /// Compares `frame` against the last accepted frame and appends the fresh
-    /// strip. Returns the match result, or nil when the frame can't be matched.
+    /// rows. Returns the match result, or nil when the frame can't be matched.
     @discardableResult
     func append(_ frame: CGImage) -> MatchResult? {
         guard frame.width == width, frame.height == height,
-              let newGray = ImageStitcher.grayBuffer(frame),
-              let match = matchFrame(prev: prevGray, new: newGray)
-        else { return nil }
+              let new = ImageStitcher.decode(frame) else { return nil }
 
-        prevGray = newGray          // accepted: canvas bottom is now this frame
-        if match.dy > 0 {
-            grow(by: match.dy, from: frame)
+        // Quick identity check: unchanged frame → dy 0.
+        if ImageStitcher.meanAbsDiff(prev.gray, new.gray, width: width, height: height) < 0.7 {
+            prev = new
+            frameCount += 1
+            return MatchResult(dy: 0, dx: 0)
         }
+
+        // Rows identical in both frames at the same position form the sticky
+        // footer. A blank stretch of real content can look static too; that
+        // only postpones those rows (see the bookkeeping below), never loses
+        // or duplicates them.
+        let footer = ImageStitcher.staticBottomRows(prev.gray, new.gray, width: width,
+                                                    height: height, maxRows: height / 2)
+        let contentEnd = height - footer
+        let bottom = min(contentBottom, contentEnd)
+
+        guard let match = matchFrame(prev: prev.gray, new: new.gray,
+                                     contentEnd: contentEnd, maxShift: bottom)
+        else { return nil }
+        guard match.dx == 0 else { return match }   // caller aborts; keep canvas intact
+
+        // Drop any canvas rows that turned out to be footer, then append the
+        // content the scroll revealed: new-frame rows [bottom - dy, contentEnd).
+        rowCount -= contentBottom - bottom
+        let start = bottom - match.dy
+        pixels.removeSubrange((rowCount * bytesPerRow)...)
+        pixels.append(contentsOf: new.bgra[(start * bytesPerRow)..<(contentEnd * bytesPerRow)])
+        rowCount += contentEnd - start
+        contentBottom = contentEnd
+        prev = new
         frameCount += 1
         return match
-    }
-
-    /// Appends the bottom `dy` pixels of `frame` to the canvas.
-    private func grow(by dy: Int, from frame: CGImage) {
-        guard let old = canvas.makeImage(),
-              let newCanvas = ImageStitcher.makeContext(width: width, height: canvasHeight + dy),
-              let freshStrip = frame.cropping(to: CGRect(x: 0, y: height - dy, width: width, height: dy))
-        else { return }
-        // CGContext draws y-up, CGImage crops are top-left origin. Old content
-        // stays at the top of the taller canvas, the fresh strip at the bottom.
-        newCanvas.draw(old, in: CGRect(x: 0, y: dy, width: width, height: canvasHeight))
-        newCanvas.draw(freshStrip, in: CGRect(x: 0, y: 0, width: width, height: dy))
-        canvas = newCanvas
-        canvasHeight += dy
     }
 
     // MARK: - Matching
 
     /// Finds how far the previous frame's content moved up in the new frame.
-    private func matchFrame(prev: Gray, new: Gray) -> MatchResult? {
+    /// `contentEnd` excludes the sticky footer; `maxShift` bounds dy so the
+    /// appended strip starts inside the new frame.
+    private func matchFrame(prev: [UInt8], new: [UInt8], contentEnd: Int, maxShift: Int) -> MatchResult? {
         let w = width
         let h = height
 
-        // Quick identity check: unchanged frame → dy 0.
-        if ImageStitcher.meanAbsDiff(prev.buf, new.buf, width: w, height: h, dyA: 0, dyB: 0) < 0.7 {
-            return MatchResult(dy: 0, dx: 0)
-        }
-
-        // Probe strip: rows near the bottom of the previous frame.
+        // Probe strip: content rows just above the footer of the previous frame.
         let probeH = min(280, h / 3)
-        let probeTop = h - probeH - 24
-        guard probeTop > 0 else { return nil }
-        let maxDy = probeTop - 8      // probe must stay inside the new frame
+        let probeTop = contentEnd - probeH - 12
+        guard probeTop > 8 else { return nil }
+        let maxDy = min(probeTop, maxShift)      // probe must stay inside the new frame
+        guard maxDy >= 1 else { return nil }
 
-        // Single-pixel scan across the whole range: coarse stepping can land on
-        // near-miss offsets that look plausible on banded content (text lines,
-        // table rows), and then fail the ambiguity gate before refinement.
-        var bestDy = 0
-        var bestCost = Double.greatestFiniteMagnitude
-        var secondBest = Double.greatestFiniteMagnitude
+        return prev.withUnsafeBufferPointer { pa -> MatchResult? in
+            new.withUnsafeBufferPointer { pb -> MatchResult? in
+                let a = pa.baseAddress!, b = pb.baseAddress!
 
-        for dy in 1...maxDy {
-            let cost = ImageStitcher.stripDiff(prev.buf, new.buf, width: w,
-                                               topA: probeTop, dy: dy, probeH: probeH)
-            if cost < bestCost {
-                secondBest = bestCost
-                bestCost = cost
-                bestDy = dy
-            } else if cost < secondBest {
-                secondBest = cost
-            }
-        }
-
-        guard bestDy > 0, bestCost < 6.0 else { return nil }     // no confident match
-        // Require the winner to be clearly better than the runner-up, unless the
-        // match is essentially perfect (uniform content repeats).
-        guard bestCost < 1.0 || bestCost < secondBest * 0.85 else { return nil }
-
-        // Verification pass with *dense* row sampling. Sparse sampling can rate
-        // a near-miss dy as 0 on banded content (text lines, list rows), and the
-        // smallest such dy then wins — a systematic 1–2 px shrink per frame.
-        var refinedDy = bestDy
-        if bestCost < 1.0 {
-            var denseBest = Double.greatestFiniteMagnitude
-            for cand in max(1, bestDy - 4)...min(maxDy, bestDy + 4) {
-                let cost = ImageStitcher.stripDiff(prev.buf, new.buf, width: w,
-                                                   topA: probeTop, dy: cand, probeH: probeH,
-                                                   dx: 0, stepY: 1, stepX: 4)
-                if cost < denseBest {
-                    denseBest = cost
-                    refinedDy = cand
+                // Single-pixel scan across the whole range: coarse stepping can
+                // land on near-miss offsets that look plausible on banded content
+                // (text lines, table rows), and then fail the ambiguity gate.
+                var bestDy = 0
+                var bestCost = Double.greatestFiniteMagnitude
+                var secondBest = Double.greatestFiniteMagnitude
+                for dy in 1...maxDy {
+                    let cost = ImageStitcher.stripDiff(a, b, width: w, height: h,
+                                                       topA: probeTop, dy: dy, probeH: probeH,
+                                                       cutoff: secondBest)
+                    if cost < bestCost {
+                        secondBest = bestCost
+                        bestCost = cost
+                        bestDy = dy
+                    } else if cost < secondBest {
+                        secondBest = cost
+                    }
                 }
+
+                guard bestDy > 0, bestCost < 6.0 else { return nil }     // no confident match
+                // Require the winner to be clearly better than the runner-up,
+                // unless the match is essentially perfect (uniform content repeats).
+                guard bestCost < 1.0 || bestCost < secondBest * 0.85 else { return nil }
+
+                // Verification pass with *dense* row sampling. Sparse sampling can
+                // rate a near-miss dy as 0 on banded content, and the smallest such
+                // dy then wins — a systematic 1–2 px shrink per frame.
+                var refinedDy = bestDy
+                if bestCost < 1.0 {
+                    var denseBest = Double.greatestFiniteMagnitude
+                    for cand in max(1, bestDy - 4)...min(maxDy, bestDy + 4) {
+                        let cost = ImageStitcher.stripDiff(a, b, width: w, height: h,
+                                                           topA: probeTop, dy: cand, probeH: probeH,
+                                                           stepY: 1, stepX: 4)
+                        if cost < denseBest {
+                            denseBest = cost
+                            refinedDy = cand
+                        }
+                    }
+                }
+                let refinedCost = ImageStitcher.stripDiff(a, b, width: w, height: h,
+                                                          topA: probeTop, dy: refinedDy, probeH: probeH)
+
+                // Horizontal drift check at the winning dy. Require a clear win so
+                // sub-pixel rendering noise doesn't abort a vertical capture.
+                var bestDx = 0
+                var bestDxCost = refinedCost
+                for dx in [-6, -4, -2, -1, 1, 2, 4, 6] {
+                    let cost = ImageStitcher.stripDiff(a, b, width: w, height: h,
+                                                       topA: probeTop, dy: refinedDy, probeH: probeH, dx: dx)
+                    if cost < bestDxCost * 0.5 && refinedCost > 1.0 { bestDxCost = cost; bestDx = dx }
+                }
+
+                return MatchResult(dy: refinedDy, dx: bestDx)
             }
         }
-        let refinedCost = bestCost
-
-        // Horizontal drift check at the winning dy.
-        var bestDx = 0
-        var bestDxCost = refinedCost
-        for dx in [-6, -4, -2, -1, 1, 2, 4, 6] {
-            let cost = ImageStitcher.stripDiff(prev.buf, new.buf, width: w,
-                                               topA: probeTop, dy: refinedDy, probeH: probeH, dx: dx)
-            if cost < bestDxCost { bestDxCost = cost; bestDx = dx }
-        }
-
-        return MatchResult(dy: refinedDy, dx: bestDx)
     }
 
     // MARK: - Pixel helpers
 
-    private struct Gray {
-        var buf: [UInt8]
-        var width: Int
-        var height: Int
+    private struct Frame {
+        /// Top-down BGRA rows, `width * 4` bytes each.
+        var bgra: [UInt8]
+        /// Luminance, one byte per pixel.
+        var gray: [UInt8]
     }
 
-    /// Luminance buffer, normalized by redrawing into a fresh bitmap so cropped
-    /// sub-images (whose data provider shares the parent's buffer) read right.
-    private static func grayBuffer(_ image: CGImage) -> Gray? {
+    private static let bitmapInfo =
+        CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+
+    /// Normalizes a frame by redrawing it into a tightly packed bitmap (so
+    /// cropped sub-images, whose data provider shares the parent's buffer,
+    /// read right) and derives its luminance.
+    private static func decode(_ image: CGImage) -> Frame? {
         let w = image.width, h = image.height
-        guard let ctx = makeContext(width: w, height: h),
-              let raw = ctx.data else { return nil }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        let base = raw.assumingMemoryBound(to: UInt8.self)
-        let bpl = ctx.bytesPerRow
-        var buf = [UInt8](repeating: 0, count: w * h)
-        for y in 0..<h {
-            let row = base + y * bpl
-            for x in 0..<w {
-                let off = x * 4
-                // BGRA little-endian: B=off, G=off+1, R=off+2.
-                let c0 = UInt32(row[off]), c1 = UInt32(row[off + 1]), c2 = UInt32(row[off + 2])
-                buf[y * w + x] = UInt8((c0 * 29 + c1 * 150 + c2 * 77) >> 8)
+        var bgra = [UInt8](repeating: 0, count: w * h * 4)
+        let drew = bgra.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h,
+                                      bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: bitmapInfo) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drew else { return nil }
+
+        var gray = [UInt8](repeating: 0, count: w * h)
+        bgra.withUnsafeBufferPointer { src in
+            gray.withUnsafeMutableBufferPointer { dst in
+                for i in 0..<(w * h) {
+                    let off = i * 4
+                    // BGRA little-endian: B=off, G=off+1, R=off+2.
+                    let c0 = UInt32(src[off]), c1 = UInt32(src[off + 1]), c2 = UInt32(src[off + 2])
+                    dst[i] = UInt8((c0 * 29 + c1 * 150 + c2 * 77) >> 8)
+                }
             }
         }
-        return Gray(buf: buf, width: w, height: h)
+        return Frame(bgra: bgra, gray: gray)
     }
 
     /// Mean absolute difference over the full frame (sampled).
-    private static func meanAbsDiff(_ a: [UInt8], _ b: [UInt8], width w: Int, height h: Int,
-                                    dyA: Int, dyB: Int) -> Double {
+    private static func meanAbsDiff(_ a: [UInt8], _ b: [UInt8], width w: Int, height h: Int) -> Double {
         var sum = 0, n = 0
-        var y = 0
-        while y < h {
-            var x = 0
-            while x < w {
-                sum += abs(Int(a[(y + dyA) * w + x]) - Int(b[(y + dyB) * w + x]))
-                n += 1
-                x += 8
+        a.withUnsafeBufferPointer { pa in
+            b.withUnsafeBufferPointer { pb in
+                var y = 0
+                while y < h {
+                    var x = 0
+                    while x < w {
+                        sum += abs(Int(pa[y * w + x]) - Int(pb[y * w + x]))
+                        n += 1
+                        x += 8
+                    }
+                    y += 8
+                }
             }
-            y += 8
         }
         return n > 0 ? Double(sum) / Double(n) : .greatestFiniteMagnitude
+    }
+
+    /// Number of bottom rows that are identical in both frames. A couple of
+    /// differing samples per row are tolerated (blinking caret).
+    private static func staticBottomRows(_ a: [UInt8], _ b: [UInt8], width w: Int, height h: Int,
+                                         maxRows: Int) -> Int {
+        a.withUnsafeBufferPointer { pa -> Int in
+            b.withUnsafeBufferPointer { pb -> Int in
+                var rows = 0
+                while rows < maxRows {
+                    let base = (h - 1 - rows) * w
+                    var changed = 0
+                    var x = 0
+                    while x < w {
+                        if abs(Int(pa[base + x]) - Int(pb[base + x])) > 20 {
+                            changed += 1
+                            if changed > 2 { return rows }
+                        }
+                        x += 2
+                    }
+                    rows += 1
+                }
+                return rows
+            }
+        }
     }
 
     /// Mean absolute difference of the probe strip: rows [topA, topA+probeH) of
     /// `a` against rows [topA-dy, ...) of `b` (content moved up by dy), sampled.
-    private static func stripDiff(_ a: [UInt8], _ b: [UInt8], width w: Int,
+    /// Stops early once the running sum can no longer beat `cutoff`.
+    private static func stripDiff(_ a: UnsafePointer<UInt8>, _ b: UnsafePointer<UInt8>,
+                                  width w: Int, height h: Int,
                                   topA: Int, dy: Int, probeH: Int, dx: Int = 0,
-                                  stepY: Int = 3, stepX: Int = 6) -> Double {
-        var sum = 0, n = 0
+                                  stepY: Int = 3, stepX: Int = 6,
+                                  cutoff: Double = .greatestFiniteMagnitude) -> Double {
+        guard topA - dy >= 0, topA + probeH <= h else { return .greatestFiniteMagnitude }
+        let x0 = 8 + max(0, dx)
+        let x1 = w - 8 + min(0, dx)
+        guard x1 > x0 else { return .greatestFiniteMagnitude }
+        let perRow = (x1 - x0 + stepX - 1) / stepX
+        let rows = (probeH + stepY - 1) / stepY
+        let total = perRow * rows
+        let budget = cutoff == .greatestFiniteMagnitude ? Int.max : Int(cutoff * Double(total)) + 1
+
+        var sum = 0
         var y = 0
         while y < probeH {
-            let ya = topA + y
-            let yb = ya - dy
-            if yb < 0 { return .greatestFiniteMagnitude }
-            var x = 8 + max(0, dx)
-            while x < w - 8 + min(0, dx) {
-                sum += abs(Int(a[ya * w + x]) - Int(b[yb * w + x - dx]))
-                n += 1
+            let ra = a + (topA + y) * w
+            let rb = b + (topA + y - dy) * w - dx
+            var x = x0
+            while x < x1 {
+                sum += abs(Int(ra[x]) - Int(rb[x]))
                 x += stepX
             }
+            if sum > budget { return .greatestFiniteMagnitude }
             y += stepY
         }
-        return n > 0 ? Double(sum) / Double(n) : .greatestFiniteMagnitude
-    }
-
-    private static func makeContext(width: Int, height: Int) -> CGContext? {
-        CGContext(data: nil, width: width, height: height,
-                  bitsPerComponent: 8, bytesPerRow: 0,
-                  space: CGColorSpaceCreateDeviceRGB(),
-                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        return Double(sum) / Double(total)
     }
 }

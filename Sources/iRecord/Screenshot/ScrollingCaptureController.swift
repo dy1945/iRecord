@@ -25,6 +25,8 @@ final class ScrollingCaptureController {
     private var keyMonitor: Any?
     private var keyMonitorLocal: Any?
     private var autoScroll = false
+    private var session: UUID?
+    private var lastPreviewUpdate = Date.distantPast
 
     private let maxStitchedPixels = 32_000
 
@@ -34,8 +36,22 @@ final class ScrollingCaptureController {
         stillCount = 0
         didScroll = false
         autoScroll = false
+        lastPreviewUpdate = .distantPast
+        let session = UUID()
+        self.session = session
 
-        guard let first = ScreenshotCapture.capture(globalRect: globalRect),
+        // The selection overlay was just ordered out; give the WindowServer a
+        // moment so the target app repaints (hover/focus states) before the
+        // first frame — otherwise it can differ from the next one and the top
+        // of the long image starts with a stale frame.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, self.session == session else { return }
+            self.beginCapture()
+        }
+    }
+
+    private func beginCapture() {
+        guard let first = grab(),
               let stitcher = ImageStitcher(firstFrame: first) else {
             NSSound.beep()
             return
@@ -45,16 +61,24 @@ final class ScrollingCaptureController {
 
         showHUD()
         showPreview()
+        updatePreview(force: true)
 
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 6.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 8.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+    }
+
+    /// Our HUD and preview float above the page (and may overlap the region
+    /// when there's no room beside it), so they must never end up in a frame.
+    private func grab() -> CGImage? {
+        ScreenshotCapture.captureExcludingOwnWindows(globalRect: globalRect)
+            ?? ScreenshotCapture.capture(globalRect: globalRect)
     }
 
     // MARK: - Capture loop
 
     private func tick() {
-        guard let frame = ScreenshotCapture.capture(globalRect: globalRect) else { return }
+        guard let frame = grab() else { return }
         guard let stitcher else { return }
 
         guard let match = stitcher.append(frame) else {
@@ -70,12 +94,12 @@ final class ScrollingCaptureController {
 
         if match.dy == 0 {
             stillCount += 1
-            if autoScroll, stillCount > 6 {
+            if autoScroll, stillCount > 8 {
                 // Auto-scroll hit the bottom of the content.
                 finish()
                 return
             }
-            if didScroll, stillCount > 15 {   // ~2.5 s without movement
+            if didScroll, stillCount > 20 {   // ~2.5 s without movement
                 finish()
                 return
             }
@@ -98,7 +122,7 @@ final class ScrollingCaptureController {
     // MARK: - Finish / cancel
 
     private func finish() {
-        guard let image = stitcher?.currentImage else { teardown(); return }
+        guard timer != nil, let image = stitcher?.currentImage else { teardown(); return }
         let scale = CGFloat(lastFrame?.height ?? Int(globalRect.height)) / globalRect.height
         let nsImage = NSImage(cgImage: image, size: NSSize(
             width: CGFloat(image.width) / scale,
@@ -121,6 +145,7 @@ final class ScrollingCaptureController {
     private func stopTeardown() { teardown() }
 
     private func teardown() {
+        session = nil
         timer?.invalidate()
         timer = nil
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
@@ -277,8 +302,12 @@ final class ScrollingCaptureController {
         preview = panel
     }
 
-    private func updatePreview() {
-        guard let img = stitcher?.currentImage else { return }
+    /// Rebuilding the full long image is not free, so the live preview is
+    /// refreshed at most ~3×/s.
+    private func updatePreview(force: Bool = false) {
+        guard force || Date().timeIntervalSince(lastPreviewUpdate) > 0.3,
+              let img = stitcher?.currentImage else { return }
+        lastPreviewUpdate = Date()
         previewView?.image = NSImage(cgImage: img, size: NSSize(width: img.width, height: img.height))
     }
 

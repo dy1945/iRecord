@@ -255,16 +255,44 @@ enum SelfTest {
     /// Headless verification of the scrolling-screenshot stitch engine.
     /// Builds a synthetic tall "page", simulates scroll frames (variable step
     /// sizes, including a fast jump and a no-move frame), stitches them, and
-    /// verifies the result reconstructs the page pixel-accurately.
+    /// verifies the result reconstructs the page pixel-accurately. A second
+    /// pass overlays a sticky header and footer (like a chat input bar), which
+    /// must appear exactly once in the result.
     /// `iRecord --stitchtest`
     static func runStitch() -> Never {
-        let pageW = 320, pageH = 3000, frameH = 480
+        let plain = stitchScenario(name: "plain", frameH: 480, headerH: 0, footerH: 0)
+        let sticky = stitchScenario(name: "sticky header/footer", frameH: 600, headerH: 40, footerH: 70)
+        if plain && sticky {
+            print("[stitchtest] PASS ✅  stitched image reconstructs the page exactly")
+            exit(0)
+        }
+        print("[stitchtest] FAIL ❌")
+        exit(6)
+    }
+
+    private static func stitchScenario(name: String, frameH: Int, headerH: Int, footerH: Int) -> Bool {
+        let pageW = 320, pageH = 3000
         guard let page = syntheticPage(width: pageW, height: pageH) else {
-            print("[stitchtest] FAIL: could not build synthetic page"); exit(5)
+            print("[stitchtest] \(name): could not build synthetic page"); return false
         }
 
         func frame(atTop top: Int) -> CGImage? {
-            page.cropping(to: CGRect(x: 0, y: top, width: pageW, height: frameH))
+            guard let crop = page.cropping(to: CGRect(x: 0, y: top, width: pageW, height: frameH)) else { return nil }
+            if headerH == 0 && footerH == 0 { return crop }
+            guard let ctx = CGContext(data: nil, width: pageW, height: frameH,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+            else { return nil }
+            ctx.draw(crop, in: CGRect(x: 0, y: 0, width: pageW, height: frameH))
+            // CGContext is y-up: the header is at the top, the footer at y = 0.
+            ctx.setFillColor(red: 0.95, green: 0.95, blue: 0.97, alpha: 1)
+            ctx.fill(CGRect(x: 0, y: frameH - headerH, width: pageW, height: headerH))
+            ctx.setFillColor(red: 0.2, green: 0.25, blue: 0.3, alpha: 1)
+            ctx.fill(CGRect(x: 0, y: 0, width: pageW, height: footerH))
+            ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+            ctx.fill(CGRect(x: 20, y: footerH / 3, width: pageW - 80, height: footerH / 3))
+            return ctx.makeImage()
         }
 
         // Scroll offsets (content moves up): mixed small/large steps.
@@ -279,7 +307,7 @@ enum SelfTest {
         tops.append(tops.last!)    // no-movement frame at the end
 
         guard let first = frame(atTop: 0), let stitcher = ImageStitcher(firstFrame: first) else {
-            print("[stitchtest] FAIL: init"); exit(5)
+            print("[stitchtest] \(name): init failed"); return false
         }
         var matched = 0
         var prevTop = tops.first!
@@ -289,34 +317,39 @@ enum SelfTest {
                 if m.dy > 0 {
                     matched += 1
                     if m.dy != top - prevTop {
-                        print("[stitchtest] frame \(idx): dy=\(m.dy) actual=\(top - prevTop)  ⚠️")
+                        print("[stitchtest] \(name) frame \(idx): dy=\(m.dy) actual=\(top - prevTop)  ⚠️")
                     }
                 }
                 prevTop = top
             } else {
-                print("[stitchtest] frame \(idx) (top=\(top)): no match (step too large)")
+                print("[stitchtest] \(name) frame \(idx) (top=\(top)): no match (step too large)")
             }
         }
 
-        guard let result = stitcher.currentImage else {
-            print("[stitchtest] FAIL: no result"); exit(5)
+        guard let result = stitcher.currentImage, let last = frame(atTop: tops.last!) else {
+            print("[stitchtest] \(name): no result"); return false
         }
         let expectedH = frameH + (tops.last! - 0)
-        print("[stitchtest] frames=\(tops.count) stitchedH=\(result.height) expectedH=\(expectedH) appended=\(matched)")
+        print("[stitchtest] \(name): frames=\(tops.count) stitchedH=\(result.height) expectedH=\(expectedH) appended=\(matched)")
 
-        // Verify content: compare rows of the stitched image against the page.
+        // Verify content: rows between the sticky bands must equal the page;
+        // the bottom rows must be the footer of the last frame (exactly once).
         var mismatches = 0
-        if result.height == expectedH, let buf1 = grayRows(result), let buf2 = grayRows(page) {
-            for row in [0, expectedH/4, expectedH/2, expectedH*3/4, expectedH-1] {
-                if buf1[row] != buf2[row] { mismatches += 1 }
+        if result.height == expectedH,
+           let got = grayRows(result), let want = grayRows(page), let lastRows = grayRows(last) {
+            for row in [headerH, expectedH / 4, expectedH / 2, expectedH * 3 / 4, expectedH - footerH - 1]
+            where got[row] != want[row] {
+                mismatches += 1
+            }
+            for k in 1...max(1, footerH) where got[expectedH - k] != lastRows[frameH - k] {
+                mismatches += 1
             }
         }
-        if result.height == expectedH && mismatches == 0 {
-            print("[stitchtest] PASS ✅  stitched image reconstructs the page exactly")
-            exit(0)
+        let ok = result.height == expectedH && mismatches == 0
+        if !ok {
+            print("[stitchtest] \(name): heightOK=\(result.height == expectedH) rowMismatches=\(mismatches)")
         }
-        print("[stitchtest] FAIL ❌  heightOK=\(result.height == expectedH) rowMismatches=\(mismatches)")
-        exit(6)
+        return ok
     }
 
     /// Headless verification of the still-screenshot pipeline: freeze all

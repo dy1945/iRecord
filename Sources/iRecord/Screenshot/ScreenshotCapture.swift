@@ -38,6 +38,37 @@ enum ScreenshotCapture {
                                        [.bestResolution, .boundsIgnoreFraming])
     }
 
+    /// Like `capture(globalRect:)`, but leaves out iRecord's own windows (the
+    /// scrolling HUD / live preview, and the selection overlay while it is
+    /// still fading out). Those sit still while the content scrolls, so if
+    /// they overlap the region they break frame matching and get stitched
+    /// into the long image over and over.
+    static func captureExcludingOwnWindows(globalRect: CGRect) -> CGImage? {
+        let q = quartzRect(from: globalRect)
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        guard let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]]
+        else { return capture(globalRect: globalRect) }
+
+        let ids: [CGWindowID] = list.compactMap { info in
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value != ownPID,
+                  let number = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
+                  bounds.intersects(q) else { return nil }
+            return number
+        }
+        guard !ids.isEmpty else { return nil }
+
+        // CGWindowListCreateImageFromArray wants a CFArray of raw CGWindowIDs.
+        let pointers = ids.map { UnsafeRawPointer(bitPattern: UInt($0)) }
+        let array = pointers.withUnsafeBufferPointer {
+            CFArrayCreate(kCFAllocatorDefault, UnsafeMutablePointer(mutating: $0.baseAddress), ids.count, nil)
+        }
+        guard let array else { return nil }
+        return CGImage(windowListFromArrayScreenBounds: q, windowArray: array,
+                       imageOption: [.bestResolution, .boundsIgnoreFraming])
+    }
+
     /// Crops a global Cocoa rect out of the frozen displays. Returns nil when
     /// the rect does not intersect any frozen display.
     static func crop(globalRect: CGRect, from frozen: [FrozenDisplay]) -> CGImage? {
