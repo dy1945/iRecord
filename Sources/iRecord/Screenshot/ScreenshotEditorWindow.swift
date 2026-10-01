@@ -505,7 +505,7 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     private func beginText(at p: CGPoint) {
         textAnchor = p
         let tf = makeInlineField(font: .systemFont(ofSize: currentTextSize, weight: .medium),
-                                 placeholder: L10n.tr("Text", "输入文字"))
+                                 placeholder: L10n.tr("Text", "输入文字"), filled: false)
         tf.setFrameOrigin(p)
         textField = tf
         fitTextField(tf)
@@ -515,20 +515,23 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
 
     /// Inline editor shared by text and marker captions: a hairline border in
     /// the annotation colour instead of the heavy square bezel.
-    private func makeInlineField(font: NSFont, placeholder: String) -> NSTextField {
-        let tf = NSTextField(frame: .zero)
+    /// `filled`: marker caption — previews the final tag (annotation-colour
+    /// fill, contrasting text). Otherwise free text — transparent, so what you
+    /// type looks like the committed text. Both share the same 1 px outline.
+    private func makeInlineField(font: NSFont, placeholder: String, filled: Bool) -> NSTextField {
+        let tf = InlineTextField(frame: .zero)
+        let textColor = filled ? AnnotationEditorView.contrastingText(on: currentColor) : currentColor
+        tf.fillColor = filled ? currentColor.withAlphaComponent(0.92) : .clear
+        tf.outlineColor = currentColor.withAlphaComponent(0.85)
         tf.isBezeled = false
         tf.isBordered = false
-        tf.drawsBackground = true
-        tf.backgroundColor = NSColor.white.withAlphaComponent(0.85)
+        tf.drawsBackground = false
         tf.focusRingType = .none
         tf.font = font
-        tf.textColor = currentColor
-        tf.placeholderString = placeholder
-        tf.wantsLayer = true
-        tf.layer?.borderWidth = 1
-        tf.layer?.borderColor = currentColor.withAlphaComponent(0.7).cgColor
-        tf.layer?.cornerRadius = 3
+        tf.textColor = textColor
+        tf.placeholderAttributedString = NSAttributedString(string: placeholder, attributes: [
+            .font: font, .foregroundColor: textColor.withAlphaComponent(0.55)
+        ])
         tf.target = self
         tf.action = #selector(textCommitted(_:))
         tf.delegate = self
@@ -539,7 +542,7 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     /// field stays centred on its caption anchor.
     private func fitTextField(_ tf: NSTextField) {
         let font = tf.font ?? .systemFont(ofSize: currentTextSize)
-        let str = (tf.stringValue.isEmpty ? (tf.placeholderString ?? "") : tf.stringValue) as NSString
+        let str = (tf.stringValue.isEmpty ? (tf.placeholderAttributedString?.string ?? "") : tf.stringValue) as NSString
         let textW = str.size(withAttributes: [.font: font]).width
         let size = NSSize(width: max(60, ceil(textW) + 14), height: ceil(font.ascender - font.descender + font.leading) + 6)
         if let idx = captionIndex, shapes.indices.contains(idx) {
@@ -602,7 +605,20 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     private func captionFontSize(for textSize: CGFloat) -> CGFloat { (textSize * 0.8).rounded() }
 
     private func captionAttributes(for s: Shape) -> [NSAttributedString.Key: Any] {
-        [.font: NSFont.systemFont(ofSize: s.fontSize, weight: .semibold), .foregroundColor: s.color]
+        [.font: NSFont.systemFont(ofSize: s.fontSize, weight: .semibold),
+         .foregroundColor: AnnotationEditorView.contrastingText(on: s.color)]
+    }
+
+    /// White or near-black, whichever reads on `fill`. White is preferred
+    /// while it keeps ≥ 3:1 contrast (bold caption text), so red and blue tags
+    /// get white text like the number badges; orange, yellow and green get
+    /// dark text, where white would drop to ~2:1.
+    static func contrastingText(on fill: NSColor) -> NSColor {
+        guard let c = fill.usingColorSpace(.sRGB) else { return .white }
+        func lin(_ v: CGFloat) -> CGFloat { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        let lum = 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
+        let whiteContrast = 1.05 / (lum + 0.05)
+        return whiteContrast >= 3 ? .white : NSColor(white: 0.11, alpha: 1)
     }
 
     /// Rounded pill behind a marker caption, centred on `end`.
@@ -638,7 +654,8 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     private func beginCaption(for index: Int) {
         captionIndex = index
         let tf = makeInlineField(font: .systemFont(ofSize: shapes[index].fontSize, weight: .semibold),
-                                 placeholder: L10n.tr("Caption (optional)", "编号说明（可留空）"))
+                                 placeholder: L10n.tr("Caption (optional)", "编号说明（可留空）"),
+                                 filled: true)
         tf.alignment = .center
         textField = tf
         fitTextField(tf)
@@ -758,12 +775,10 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
             }
             if !s.text.isEmpty {
                 let pill = captionPill(for: s)
-                let bg = NSBezierPath(roundedRect: pill, xRadius: 4, yRadius: 4)
-                NSColor.white.withAlphaComponent(0.85).setFill()
-                bg.fill()
-                s.color.withAlphaComponent(0.7).setStroke()
-                bg.lineWidth = 1
-                bg.stroke()
+                // Tag in the annotation colour, like the number badge: no
+                // bright white block on the screenshot.
+                s.color.withAlphaComponent(0.92).setFill()
+                NSBezierPath(roundedRect: pill, xRadius: 4, yRadius: 4).fill()
                 let size = (s.text as NSString).size(withAttributes: captionAttributes(for: s))
                 drawString(s.text as NSString,
                            at: CGPoint(x: pill.midX - size.width / 2, y: pill.midY - size.height / 2),
@@ -865,5 +880,23 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
         let img = NSImage(size: pointSize)
         img.addRepresentation(rep)
         return img
+    }
+}
+
+/// Inline annotation input: draws its own 1 px rounded outline (and optional
+/// fill) so free-text and caption fields look identical, independent of the
+/// bezel/layer styling AppKit applies to text fields.
+private final class InlineTextField: NSTextField {
+    var fillColor: NSColor = .clear
+    var outlineColor: NSColor = .clear
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+        fillColor.setFill()
+        path.fill()
+        outlineColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        super.draw(dirtyRect)
     }
 }

@@ -329,8 +329,13 @@ final class ScreenshotOverlayController {
         ocrTask?.cancel()
         ocrTask = nil
         activeSelectionView = nil
+        // The overlay owned the cursor (selection arrow with the + badge).
+        // Closing its windows doesn't hand it back, so restore the system
+        // arrow now and again once the windows are actually gone.
+        NSCursor.arrow.set()
         windows.forEach { $0.orderOut(nil) }
         windows.removeAll()
+        DispatchQueue.main.async { NSCursor.arrow.set() }
     }
 
     private func clearAutoSelections(except view: NSView) {
