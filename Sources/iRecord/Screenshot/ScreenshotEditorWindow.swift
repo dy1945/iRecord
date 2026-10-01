@@ -1,11 +1,13 @@
 import AppKit
 
-/// Annotation editor for screenshots — iShot's 截屏编辑 as a dedicated window.
+/// Annotation editor for screenshots — iShot's 截屏编辑 as a dedicated window
+/// (scrolling screenshots, pin re-editing).
 ///
-/// Tools: rectangle · ellipse · arrow · line · numbered marker · mosaic
-/// (pixel-block) · text. 5 preset colours, 3 stroke widths, ⌘Z undo. Output:
-/// Save… / Copy / Pin / Cancel — and when opened from a pin, "Update Pin"
-/// (iShot's 二次标注: annotations baked back into the pin).
+/// Uses the same toolbar and shortcuts as the in-place editor of a direct
+/// screenshot: tools · colour / text-size palette · undo · pin · save · copy ·
+/// cancel; Enter copies, Space saves, T pins, Esc cancels. When opened from a
+/// pin, save becomes "Update Pin" (iShot's 二次标注: annotations baked back
+/// into the pin).
 @MainActor
 final class ScreenshotEditorController {
     static let shared = ScreenshotEditorController()
@@ -18,7 +20,6 @@ final class ScreenshotEditorController {
         if let window { window.close() }
 
         let editor = AnnotationEditorView(image: image)
-        editor.currentTool = .rect
         editor.onFinished = { [weak self] result in
             switch result {
             case .save(let img):
@@ -50,6 +51,7 @@ final class ScreenshotEditorController {
         win.delegate = CloseRelay.shared
         CloseRelay.shared.onClose = { [weak self] in self?.window = nil }
         win.makeKeyAndOrderFront(nil)
+        win.makeFirstResponder(editor)
         NSApp.activate(ignoringOtherApps: true)
         self.window = win
     }
@@ -95,9 +97,9 @@ struct Shape {
     var color: NSColor
     var width: CGFloat            // stroke width (points)
     var start: CGPoint
-    var end: CGPoint
-    var text: String = ""         // text shape: body; marker shape: caption above the number
-    var fontSize: CGFloat = 18    // text only
+    var end: CGPoint              // marker: centre of its caption (leader-line target)
+    var text: String = ""         // text shape: body; marker shape: its caption
+    var fontSize: CGFloat = 18    // text: body size; marker: caption size
     var number: Int = 0           // marker only
 
     var rect: CGRect {
@@ -106,45 +108,64 @@ struct Shape {
     }
 }
 
-// MARK: - Chrome (tool strip + canvas + bottom bar)
+// MARK: - Chrome (toolbar + canvas)
 
 private final class EditorChromeView: NSView {
     let editor: AnnotationEditorView
-    private let showsUpdate: Bool
+    private let toolbar: ShotToolbarView
+    private static let barHeight: CGFloat = 60
 
     init(editor: AnnotationEditorView, showsUpdate: Bool) {
         self.editor = editor
-        self.showsUpdate = showsUpdate
+        toolbar = ShotToolbarView(
+            editor: editor, scrollingMode: false, captureActions: false,
+            saveTip: showsUpdate ? L10n.tr("Update Pin (Space)", "更新贴图 (空格)") : nil
+        ) { [weak editor] action in
+            guard let editor else { return }
+            switch action {
+            case .copy: editor.finish(.copy(editor.flattenedImage()))
+            case .save: editor.finish(.save(editor.flattenedImage()))
+            case .pin: editor.finish(.pin(editor.flattenedImage()))
+            case .cancel: editor.finish(.cancelled)
+            default: break
+            }
+        }
         super.init(frame: .zero)
 
-        let top = ToolStrip(editor: editor)
-        let bottom = BottomBar(editor: editor, showsUpdate: showsUpdate)
+        let bar = NSView()
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = NSColor(white: 0.14, alpha: 1).cgColor
         let scroll = NSScrollView()
         scroll.documentView = editor
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.backgroundColor = NSColor(white: 0.18, alpha: 1)
 
-        for v in [top, scroll, bottom] {
+        let tbSize = toolbar.fittingSize
+        for v in [bar, scroll, toolbar] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(v)
         }
+        addSubview(bar)
+        addSubview(scroll)
+        bar.addSubview(toolbar)
         NSLayoutConstraint.activate([
-            top.leadingAnchor.constraint(equalTo: leadingAnchor),
-            top.trailingAnchor.constraint(equalTo: trailingAnchor),
-            top.topAnchor.constraint(equalTo: topAnchor),
-            top.heightAnchor.constraint(equalToConstant: 44),
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bar.topAnchor.constraint(equalTo: topAnchor),
+            bar.heightAnchor.constraint(equalToConstant: Self.barHeight),
+
+            toolbar.centerXAnchor.constraint(equalTo: bar.centerXAnchor),
+            toolbar.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            toolbar.widthAnchor.constraint(equalToConstant: tbSize.width),
+            toolbar.heightAnchor.constraint(equalToConstant: tbSize.height),
 
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: top.bottomAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottom.topAnchor),
-
-            bottom.leadingAnchor.constraint(equalTo: leadingAnchor),
-            bottom.trailingAnchor.constraint(equalTo: trailingAnchor),
-            bottom.bottomAnchor.constraint(equalTo: bottomAnchor),
-            bottom.heightAnchor.constraint(equalToConstant: 46)
+            scroll.topAnchor.constraint(equalTo: bar.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
+
+        editor.onToolChanged = { [weak self] tool in self?.toolbar.highlightTool(tool) }
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -153,188 +174,10 @@ private final class EditorChromeView: NSView {
         let cap = NSScreen.main.map {
             NSSize(width: $0.visibleFrame.width - 120, height: $0.visibleFrame.height - 200)
         } ?? NSSize(width: 900, height: 640)
-        return NSSize(width: min(img.width + 2, max(560, cap.width)),
-                      height: min(img.height + 92, max(380, cap.height)))
+        let minW = toolbar.fittingSize.width + 32
+        return NSSize(width: max(minW, min(img.width + 2, max(560, cap.width))),
+                      height: min(img.height + Self.barHeight + 2, max(380, cap.height)))
     }
-}
-
-// MARK: - Tool strip
-
-private final class ToolStrip: NSView {
-    private var buttons: [ShapeTool: NSButton] = [:]
-
-    init(editor: AnnotationEditorView) {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.14, alpha: 1).cgColor
-
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.spacing = 4
-        stack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
-        for tool in ShapeTool.allCases {
-            let b = NSButton()
-            b.image = NSImage(systemSymbolName: tool.symbol, accessibilityDescription: tool.tip)
-            b.toolTip = tool.tip
-            b.isBordered = false
-            b.bezelStyle = .regularSquare
-            b.contentTintColor = .white
-            b.target = self
-            b.action = #selector(pick(_:))
-            b.tag = ShapeTool.allCases.firstIndex(of: tool)!
-            b.widthAnchor.constraint(equalToConstant: 32).isActive = true
-            b.heightAnchor.constraint(equalToConstant: 32).isActive = true
-            buttons[tool] = b
-            stack.addArrangedSubview(b)
-        }
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-
-        editor.onToolChanged = { [weak self] tool in self?.highlight(tool) }
-        highlight(editor.currentTool)
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func pick(_ sender: NSButton) {
-        let tool = ShapeTool.allCases[sender.tag]
-        (superview as? EditorChromeView)?.editor.currentTool = tool
-    }
-
-    private func highlight(_ tool: ShapeTool?) {
-        for (t, b) in buttons {
-            b.contentTintColor = (t == tool) ? .systemRed : .white
-        }
-    }
-}
-
-// MARK: - Bottom bar
-
-private final class BottomBar: NSView {
-    private let presetColors: [NSColor] = [.systemRed, .systemOrange, .systemYellow, .systemGreen, .systemBlue]
-
-    init(editor: AnnotationEditorView, showsUpdate: Bool) {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.14, alpha: 1).cgColor
-
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-
-        // Colour swatches.
-        for (i, color) in presetColors.enumerated() {
-            let b = SwatchButton(color: color) { editor.currentColor = color }
-            b.tag = i
-            b.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            b.heightAnchor.constraint(equalToConstant: 20).isActive = true
-            stack.addArrangedSubview(b)
-        }
-        let well = NSColorWell()
-        well.color = editor.currentColor
-        well.target = self
-        well.action = #selector(colorChanged(_:))
-        well.widthAnchor.constraint(equalToConstant: 26).isActive = true
-        well.heightAnchor.constraint(equalToConstant: 26).isActive = true
-        stack.addArrangedSubview(well)
-        self.colorWell = well
-
-        stack.addArrangedSubview(separator())
-
-        // Stroke widths.
-        for (i, _) in AnnotationEditorView.widths.enumerated() {
-            let b = NSButton(title: ["S", "M", "L"][i], target: self, action: #selector(widthPicked(_:)))
-            b.tag = i
-            b.isBordered = false
-            b.contentTintColor = .white
-            b.font = .systemFont(ofSize: 12, weight: .semibold)
-            b.widthAnchor.constraint(equalToConstant: 24).isActive = true
-            stack.addArrangedSubview(b)
-        }
-
-        stack.addArrangedSubview(separator())
-
-        let undo = NSButton(image: NSImage(systemSymbolName: "arrow.uturn.left", accessibilityDescription: "Undo")!,
-                            target: self, action: #selector(undo))
-        undo.toolTip = L10n.tr("Undo (⌘Z)", "撤销 (⌘Z)")
-        undo.isBordered = false
-        undo.contentTintColor = .white
-        stack.addArrangedSubview(undo)
-
-        stack.addArrangedSubview(NSView()) // spacer
-        (stack.arrangedSubviews.last!).setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        func actionButton(_ title: String, _ symbol: String, _ sel: Selector, prominent: Bool = false) -> NSButton {
-            let b = NSButton(title: title, image: NSImage(systemSymbolName: symbol, accessibilityDescription: title)!,
-                             target: self, action: sel)
-            b.bezelStyle = .rounded
-            b.controlSize = .regular
-            if prominent { b.bezelColor = .systemRed }
-            return b
-        }
-        stack.addArrangedSubview(actionButton(L10n.tr("Cancel", "取消"), "xmark", #selector(cancel)))
-        stack.addArrangedSubview(actionButton(L10n.tr("Pin", "贴图"), "pin", #selector(pin)))
-        stack.addArrangedSubview(actionButton(L10n.tr("Copy", "复制"), "doc.on.doc", #selector(copyShot)))
-        stack.addArrangedSubview(actionButton(showsUpdate ? L10n.tr("Update Pin", "更新贴图") : L10n.tr("Save…", "保存…"),
-                                              showsUpdate ? "checkmark" : "square.and.arrow.down",
-                                              #selector(save), prominent: true))
-
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-
-        self.editor = editor
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    private weak var editor: AnnotationEditorView?
-    private weak var colorWell: NSColorWell?
-
-    private func separator() -> NSView {
-        let v = NSView()
-        v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.15).cgColor
-        v.widthAnchor.constraint(equalToConstant: 1).isActive = true
-        v.heightAnchor.constraint(equalToConstant: 20).isActive = true
-        return v
-    }
-
-    @objc private func colorChanged(_ sender: NSColorWell) { editor?.currentColor = sender.color }
-    @objc private func widthPicked(_ sender: NSButton) {
-        editor?.currentWidth = AnnotationEditorView.widths[sender.tag]
-    }
-    @objc private func undo() { editor?.undo() }
-    @objc private func cancel() { editor?.finish(.cancelled) }
-    @objc private func pin() { editor?.finish(.pin(editor!.flattenedImage())) }
-    @objc private func copyShot() { editor?.finish(.copy(editor!.flattenedImage())) }
-    @objc private func save() { editor?.finish(.save(editor!.flattenedImage())) }
-}
-
-private final class SwatchButton: NSButton {
-    init(color: NSColor, handler: @escaping () -> Void) {
-        super.init(frame: .zero)
-        title = ""
-        isBordered = false
-        wantsLayer = true
-        layer?.backgroundColor = color.cgColor
-        layer?.cornerRadius = 10
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.6).cgColor
-        layer?.borderWidth = 1
-        target = self
-        action = #selector(fire)
-        self.handler = handler
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    private var handler: (() -> Void)?
-    @objc private func fire() { handler?() }
 }
 
 // MARK: - Editor canvas
@@ -352,12 +195,19 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     var currentTool: ShapeTool? = nil { didSet { onToolChanged?(currentTool); window?.invalidateCursorRects(for: self) } }
     var currentColor: NSColor = .systemRed
     var currentWidth: CGFloat = widths[1]
+    /// Small / medium / large text sizes offered by the colour palette.
+    static let textSizes: [CGFloat] = [14, 20, 30]
     var currentTextSize: CGFloat = 20 {
         didSet {
-            if let field = textField, captionIndex == nil {
+            guard let field = textField else { return }
+            if let idx = captionIndex, shapes.indices.contains(idx) {
+                shapes[idx].fontSize = captionFontSize(for: currentTextSize)
+                field.font = .systemFont(ofSize: shapes[idx].fontSize, weight: .semibold)
+            } else {
                 field.font = .systemFont(ofSize: currentTextSize, weight: .medium)
-                field.setFrameSize(NSSize(width: field.frame.width, height: currentTextSize + 10))
             }
+            fitTextField(field)
+            needsDisplay = true
         }
     }
     var onToolChanged: ((ShapeTool?) -> Void)?
@@ -380,6 +230,9 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     /// Move session: index of the shape being dragged and the grab offset.
     private var movingIndex: Int?
     private var moveGrabOffset: CGPoint = .zero
+    /// True when the drag grabbed a marker's caption: only the caption moves
+    /// (the leader line follows), the numbered badge stays put.
+    private var movingCaption = false
     /// True while `flattenedImage()` renders into the bitmap context: its CTM
     /// is y-flipped, so NSImage/NSString drawing (which self-compensate for
     /// flipped views) must be un-flipped locally or they come out mirrored.
@@ -454,8 +307,10 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
         // text/markers/shapes can be repositioned without re-drawing.
         if let idx = shapes.indices.reversed().first(where: { hit(shape: shapes[$0], at: p) }) {
             movingIndex = idx
+            movingCaption = hitCaption(of: shapes[idx], at: p)
             NSCursor.closedHand.set()
-            moveGrabOffset = CGPoint(x: p.x - shapes[idx].start.x, y: p.y - shapes[idx].start.y)
+            let anchor = movingCaption ? shapes[idx].end : shapes[idx].start
+            moveGrabOffset = CGPoint(x: p.x - anchor.x, y: p.y - anchor.y)
             return
         }
         if tool == .text {
@@ -476,6 +331,11 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
         if let idx = movingIndex {
             NSCursor.closedHand.set()
             let p = clampToCrop(convert(event.locationInWindow, from: nil))
+            if movingCaption {
+                shapes[idx].end = CGPoint(x: p.x - moveGrabOffset.x, y: p.y - moveGrabOffset.y)
+                needsDisplay = true
+                return
+            }
             let newStart = CGPoint(x: p.x - moveGrabOffset.x, y: p.y - moveGrabOffset.y)
             let dx = newStart.x - shapes[idx].start.x
             let dy = newStart.y - shapes[idx].start.y
@@ -494,6 +354,7 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     override func mouseUp(with event: NSEvent) {
         if let idx = movingIndex {
             movingIndex = nil
+            movingCaption = false
             window?.invalidateCursorRects(for: self)
             NSCursor.openHand.set()
             // Mosaic pixels belong to the spot they covered — re-bake after a move.
@@ -531,11 +392,13 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
         case .marker:
             let r = markerRadius(for: s.width)
             if hypot(p.x - s.start.x, p.y - s.start.y) <= r + slop { return true }
-            guard !s.text.isEmpty else { return false }
-            let layout = captionLayout(for: s)
-            return CGRect(origin: layout.origin, size: layout.size)
-                .insetBy(dx: -slop, dy: -slop).contains(p)
+            return hitCaption(of: s, at: p)
         }
+    }
+
+    private func hitCaption(of s: Shape, at p: CGPoint) -> Bool {
+        guard s.tool == .marker, !s.text.isEmpty else { return false }
+        return captionPill(for: s).insetBy(dx: -4, dy: -4).contains(p)
     }
 
     /// NSString drawing mirrors its glyphs under the flatten bitmap's flipped
@@ -641,19 +504,57 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
 
     private func beginText(at p: CGPoint) {
         textAnchor = p
-        let tf = NSTextField(frame: NSRect(x: p.x, y: p.y, width: 220, height: currentTextSize + 10))
-        tf.isBezeled = true
-        tf.bezelStyle = .squareBezel
-        tf.font = .systemFont(ofSize: currentTextSize, weight: .medium)
-        tf.textColor = currentColor
+        let tf = makeInlineField(font: .systemFont(ofSize: currentTextSize, weight: .medium),
+                                 placeholder: L10n.tr("Text", "输入文字"))
+        tf.setFrameOrigin(p)
+        textField = tf
+        fitTextField(tf)
+        addSubview(tf)
+        window?.makeFirstResponder(tf)
+    }
+
+    /// Inline editor shared by text and marker captions: a hairline border in
+    /// the annotation colour instead of the heavy square bezel.
+    private func makeInlineField(font: NSFont, placeholder: String) -> NSTextField {
+        let tf = NSTextField(frame: .zero)
+        tf.isBezeled = false
+        tf.isBordered = false
+        tf.drawsBackground = true
         tf.backgroundColor = NSColor.white.withAlphaComponent(0.85)
-        tf.placeholderString = L10n.tr("Text", "输入文字")
+        tf.focusRingType = .none
+        tf.font = font
+        tf.textColor = currentColor
+        tf.placeholderString = placeholder
+        tf.wantsLayer = true
+        tf.layer?.borderWidth = 1
+        tf.layer?.borderColor = currentColor.withAlphaComponent(0.7).cgColor
+        tf.layer?.cornerRadius = 3
         tf.target = self
         tf.action = #selector(textCommitted(_:))
         tf.delegate = self
-        addSubview(tf)
-        window?.makeFirstResponder(tf)
-        textField = tf
+        return tf
+    }
+
+    /// Sizes the inline field to its text (placeholder when empty). A caption
+    /// field stays centred on its caption anchor.
+    private func fitTextField(_ tf: NSTextField) {
+        let font = tf.font ?? .systemFont(ofSize: currentTextSize)
+        let str = (tf.stringValue.isEmpty ? (tf.placeholderString ?? "") : tf.stringValue) as NSString
+        let textW = str.size(withAttributes: [.font: font]).width
+        let size = NSSize(width: max(60, ceil(textW) + 14), height: ceil(font.ascender - font.descender + font.leading) + 6)
+        if let idx = captionIndex, shapes.indices.contains(idx) {
+            let c = shapes[idx].end
+            tf.frame = NSRect(x: c.x - size.width / 2, y: c.y - size.height / 2,
+                              width: size.width, height: size.height)
+        } else {
+            tf.setFrameSize(size)
+        }
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let tf = obj.object as? NSTextField, tf === textField else { return }
+        fitTextField(tf)
+        if captionIndex != nil { needsDisplay = true }
     }
 
     @objc private func textCommitted(_ sender: NSTextField) { commitTextField() }
@@ -698,55 +599,82 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
     // MARK: Marker (numbered badge)
 
     private func markerRadius(for width: CGFloat) -> CGFloat { 10 + width * 1.3 }
-    private func captionFontSize(for width: CGFloat) -> CGFloat { fontSizeForWidth(width) * 0.8 }
+    private func captionFontSize(for textSize: CGFloat) -> CGFloat { (textSize * 0.8).rounded() }
 
-    /// Caption rect above the badge; flips below when there is no room, so the
-    /// caption stays inside the crop and survives the export.
-    private func captionLayout(for s: Shape) -> (origin: CGPoint, size: CGSize) {
-        let r = markerRadius(for: s.width)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: captionFontSize(for: s.width), weight: .semibold)
-        ]
-        let size = (s.text as NSString).size(withAttributes: attrs)
-        var y = s.start.y - r - 6 - size.height
-        if let crop = cropRect, y < crop.minY { y = s.start.y + r + 6 }
-        return (CGPoint(x: s.start.x - size.width / 2, y: y), size)
+    private func captionAttributes(for s: Shape) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: s.fontSize, weight: .semibold), .foregroundColor: s.color]
     }
 
-    /// Stamps the next numbered badge at `p` and opens a small field above it
+    /// Rounded pill behind a marker caption, centred on `end`.
+    private func captionPill(for s: Shape) -> CGRect {
+        let size = (s.text as NSString).size(withAttributes: captionAttributes(for: s))
+        let w = size.width + 12, h = size.height + 4
+        return CGRect(x: s.end.x - w / 2, y: s.end.y - h / 2, width: w, height: h)
+    }
+
+    /// Default caption spot: up and to the right of the badge, mirrored when
+    /// that would leave the crop, so there's room for a visible leader line.
+    private func defaultCaptionCenter(for p: CGPoint, radius r: CGFloat) -> CGPoint {
+        let area = cropRect ?? bounds
+        var dx = r + 46, dy = -(r + 22)
+        if p.x + dx + 50 > area.maxX { dx = -dx }
+        if p.y + dy - 14 < area.minY { dy = -dy }
+        return CGPoint(x: p.x + dx, y: p.y + dy)
+    }
+
+    /// Stamps the next numbered badge at `p` and opens a small field beside it
     /// for an optional caption (iShot 标号: click → 1, 2, 3…).
     private func stampMarker(at p: CGPoint) {
         let next = (shapes.lazy.filter { $0.tool == .marker }.map { $0.number }.max() ?? 0) + 1
+        let center = defaultCaptionCenter(for: p, radius: markerRadius(for: currentWidth))
         var s = Shape(tool: .marker, color: currentColor, width: currentWidth,
-                      start: p, end: p, fontSize: fontSizeForWidth(currentWidth))
+                      start: p, end: center, fontSize: captionFontSize(for: currentTextSize))
         s.number = next
         shapes.append(s)
         needsDisplay = true
-        beginCaption(for: shapes.count - 1, at: p)
+        beginCaption(for: shapes.count - 1)
     }
 
-    private func beginCaption(for index: Int, at p: CGPoint) {
+    private func beginCaption(for index: Int) {
         captionIndex = index
-        let fontSize = captionFontSize(for: currentWidth)
-        let h = fontSize + 10
-        let r = markerRadius(for: currentWidth)
-        // Flipped view: "above the badge" is smaller y; flip below near the top.
-        var y = p.y - r - h - 6
-        if let crop = cropRect, y < crop.minY { y = p.y + r + 6 }
-        let tf = NSTextField(frame: NSRect(x: p.x - 110, y: max(2, y), width: 220, height: h))
-        tf.isBezeled = true
-        tf.bezelStyle = .squareBezel
-        tf.font = .systemFont(ofSize: fontSize, weight: .semibold)
+        let tf = makeInlineField(font: .systemFont(ofSize: shapes[index].fontSize, weight: .semibold),
+                                 placeholder: L10n.tr("Caption (optional)", "编号说明（可留空）"))
         tf.alignment = .center
-        tf.textColor = currentColor
-        tf.backgroundColor = NSColor.white.withAlphaComponent(0.85)
-        tf.placeholderString = L10n.tr("Caption (optional)", "编号说明（可留空）")
-        tf.target = self
-        tf.action = #selector(textCommitted(_:))
-        tf.delegate = self
+        textField = tf
+        fitTextField(tf)
         addSubview(tf)
         window?.makeFirstResponder(tf)
-        textField = tf
+    }
+
+    /// Thin leader from the badge to its caption: leaves the badge radially and
+    /// eases into the side of the caption pill that faces the badge, so the
+    /// path reads as one smooth stroke wherever the caption is dragged.
+    private func leaderPath(from c: CGPoint, radius r: CGFloat, to pill: CGRect) -> NSBezierPath? {
+        guard !pill.insetBy(dx: -r, dy: -r).contains(c) else { return nil }
+
+        let end: CGPoint
+        let endTangent: CGPoint                  // direction the curve arrives in
+        if c.x < pill.minX - 4 {
+            end = CGPoint(x: pill.minX, y: pill.midY); endTangent = CGPoint(x: 1, y: 0)
+        } else if c.x > pill.maxX + 4 {
+            end = CGPoint(x: pill.maxX, y: pill.midY); endTangent = CGPoint(x: -1, y: 0)
+        } else if c.y < pill.minY {
+            end = CGPoint(x: pill.midX, y: pill.minY); endTangent = CGPoint(x: 0, y: 1)
+        } else {
+            end = CGPoint(x: pill.midX, y: pill.maxY); endTangent = CGPoint(x: 0, y: -1)
+        }
+        let vx = end.x - c.x, vy = end.y - c.y
+        let len = hypot(vx, vy)
+        guard len > r + 4 else { return nil }
+        let ux = vx / len, uy = vy / len
+        let start = CGPoint(x: c.x + ux * r, y: c.y + uy * r)
+        let d = len - r
+        let path = NSBezierPath()
+        path.move(to: start)
+        path.curve(to: end,
+                   controlPoint1: CGPoint(x: start.x + ux * d * 0.35, y: start.y + uy * d * 0.35),
+                   controlPoint2: CGPoint(x: end.x - endTangent.x * d * 0.45, y: end.y - endTangent.y * d * 0.45))
+        return path
     }
 
     // MARK: Mosaic
@@ -815,17 +743,31 @@ final class AnnotationEditorView: NSView, NSTextFieldDelegate {
         case .marker:
             let r = markerRadius(for: s.width)
             let center = s.start
+            // While its caption field is open the leader runs to the field.
+            var target: CGRect?
+            if index >= 0, index == captionIndex, let tf = textField {
+                target = tf.frame
+            } else if !s.text.isEmpty {
+                target = captionPill(for: s)
+            }
+            if let target, let leader = leaderPath(from: center, radius: r, to: target) {
+                s.color.withAlphaComponent(0.85).setStroke()
+                leader.lineWidth = 1.2
+                leader.lineCapStyle = .round
+                leader.stroke()
+            }
             if !s.text.isEmpty {
-                let layout = captionLayout(for: s)
-                let pill = NSRect(x: layout.origin.x - 5, y: layout.origin.y - 2,
-                                  width: layout.size.width + 10, height: layout.size.height + 4)
-                NSColor.white.withAlphaComponent(0.75).setFill()
-                NSBezierPath(roundedRect: pill, xRadius: 4, yRadius: 4).fill()
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: captionFontSize(for: s.width), weight: .semibold),
-                    .foregroundColor: s.color
-                ]
-                drawString(s.text as NSString, at: layout.origin, attrs: attrs)
+                let pill = captionPill(for: s)
+                let bg = NSBezierPath(roundedRect: pill, xRadius: 4, yRadius: 4)
+                NSColor.white.withAlphaComponent(0.85).setFill()
+                bg.fill()
+                s.color.withAlphaComponent(0.7).setStroke()
+                bg.lineWidth = 1
+                bg.stroke()
+                let size = (s.text as NSString).size(withAttributes: captionAttributes(for: s))
+                drawString(s.text as NSString,
+                           at: CGPoint(x: pill.midX - size.width / 2, y: pill.midY - size.height / 2),
+                           attrs: captionAttributes(for: s))
             }
             let rect = NSRect(x: center.x - r, y: center.y - r, width: 2 * r, height: 2 * r)
             s.color.setFill()

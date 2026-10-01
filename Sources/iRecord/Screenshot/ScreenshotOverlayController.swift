@@ -1102,7 +1102,11 @@ final class ShotToolbarView: NSView {
     override var fittingSize: NSSize { contentSize }
     private var toolButtons: [ShapeTool: NSButton] = [:]
 
-    init(editor: AnnotationEditorView?, scrollingMode: Bool, onAction: @escaping (ShotAction) -> Void) {
+    /// `captureActions` adds the buttons that only make sense on a live
+    /// selection (scrolling capture, OCR); the standalone editor window omits
+    /// them. `saveTip` overrides the save button's tooltip (e.g. Update Pin).
+    init(editor: AnnotationEditorView?, scrollingMode: Bool, captureActions: Bool = true,
+         saveTip: String? = nil, onAction: @escaping (ShotAction) -> Void) {
         func iconButton(_ symbol: String, _ tip: String, tinted tint: NSColor = .labelColor,
                         _ handler: @escaping () -> Void) -> NSButton {
             let b = OverlayHandlerButton(handler: handler)
@@ -1165,23 +1169,27 @@ final class ShotToolbarView: NSView {
             views.append(iconButton("arrow.uturn.left", L10n.tr("Undo (⌘Z)", "撤销 (⌘Z)")) { [weak editor] in editor?.undo() })
 
             views.append(separator())
-            views.append(iconButton("rectangle.expand.vertical", L10n.tr("Scrolling screenshot (S)", "滚动截图 (S)")) { onAction(.scrolling) })
+            if captureActions {
+                views.append(iconButton("rectangle.expand.vertical", L10n.tr("Scrolling screenshot (S)", "滚动截图 (S)")) { onAction(.scrolling) })
+            }
             views.append(iconButton("pin.fill", L10n.tr("Pin to screen (T)", "贴到屏幕 (T)")) { onAction(.pin) })
-            let ocr = OverlayHandlerButton { onAction(.ocr) }
-            ocr.title = "OCR"
-            ocr.font = .systemFont(ofSize: 12, weight: .semibold)
-            ocr.isBordered = false
-            ocr.toolTip = L10n.tr("Extract text from the original selection", "识别选区原始文字")
-            ocr.setAccessibilityLabel("OCR")
-            ocr.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                ocr.widthAnchor.constraint(equalToConstant: 42),
-                ocr.heightAnchor.constraint(equalToConstant: 38)
-            ])
-            views.append(ocr)
+            if captureActions {
+                let ocr = OverlayHandlerButton { onAction(.ocr) }
+                ocr.title = "OCR"
+                ocr.font = .systemFont(ofSize: 12, weight: .semibold)
+                ocr.isBordered = false
+                ocr.toolTip = L10n.tr("Extract text from the original selection", "识别选区原始文字")
+                ocr.setAccessibilityLabel("OCR")
+                ocr.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    ocr.widthAnchor.constraint(equalToConstant: 42),
+                    ocr.heightAnchor.constraint(equalToConstant: 38)
+                ])
+                views.append(ocr)
+            }
 
             views.append(separator())
-            views.append(iconButton("tray.and.arrow.down.fill", L10n.tr("Save… (Space)", "保存… (空格)")) { onAction(.save) })
+            views.append(iconButton("tray.and.arrow.down.fill", saveTip ?? L10n.tr("Save… (Space)", "保存… (空格)")) { onAction(.save) })
             views.append(iconButton("checkmark", L10n.tr("Copy to clipboard (Enter)", "复制到剪贴板 (Enter)"), tinted: .systemGreen) { onAction(.copy) })
 
             views.append(separator())
@@ -1353,12 +1361,13 @@ private final class ShotColorButton: NSButton {
         let colourRow = NSStackView(views: swatches)
         colourRow.orientation = .horizontal
         colourRow.spacing = 12
-        sizePicker = NSSegmentedControl(labels: [L10n.tr("Small", "小"), L10n.tr("Large", "大")],
+        sizePicker = NSSegmentedControl(labels: [L10n.tr("Small", "小"), L10n.tr("Medium", "中"), L10n.tr("Large", "大")],
                                        trackingMode: .selectOne, target: self, action: #selector(changeTextSize))
-        sizePicker.selectedSegment = editor.currentTextSize >= 30 ? 1 : 0
         sizePicker.setAccessibilityLabel(L10n.tr("Text size", "文字大小"))
-        sizePicker.setToolTip("20 pt", forSegment: 0)
-        sizePicker.setToolTip("30 pt", forSegment: 1)
+        for (i, size) in AnnotationEditorView.textSizes.enumerated() {
+            sizePicker.setToolTip("\(Int(size)) pt", forSegment: i)
+        }
+        syncSizePicker()
         let sizeRow = NSStackView(views: [NSTextField(labelWithString: L10n.tr("Text", "文字")), sizePicker])
         sizeRow.orientation = .horizontal
         sizeRow.spacing = 12
@@ -1366,7 +1375,7 @@ private final class ShotColorButton: NSButton {
         stack.orientation = .vertical
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
-        stack.frame = NSRect(x: 0, y: 0, width: 176, height: 84)
+        stack.frame = NSRect(x: 0, y: 0, width: 196, height: 84)
         let controller = NSViewController()
         controller.view = stack
         palette.contentViewController = controller
@@ -1377,12 +1386,20 @@ private final class ShotColorButton: NSButton {
     required init?(coder: NSCoder) { fatalError() }
 
     @objc private func changeTextSize() {
-        editor?.currentTextSize = sizePicker.selectedSegment == 1 ? 30 : 20
+        let sizes = AnnotationEditorView.textSizes
+        editor?.currentTextSize = sizes[max(0, min(sizes.count - 1, sizePicker.selectedSegment))]
         palette.performClose(nil)
     }
 
+    /// Selects the segment closest to the editor's current text size.
+    private func syncSizePicker() {
+        let current = editor?.currentTextSize ?? 20
+        let sizes = AnnotationEditorView.textSizes
+        sizePicker.selectedSegment = sizes.indices.min(by: { abs(sizes[$0] - current) < abs(sizes[$1] - current) }) ?? 1
+    }
+
     @objc private func togglePalette() {
-        sizePicker.selectedSegment = (editor?.currentTextSize ?? 20) >= 30 ? 1 : 0
+        syncSizePicker()
         if palette.isShown {
             palette.performClose(nil)
         } else {
