@@ -561,7 +561,7 @@ final class ShotOverlayView: NSView {
         // outside its visible border. It must not advertise an exit gesture.
         addCursorRect(currentRect.insetBy(dx: -ShotSelectionGeometry.hitSlop,
                                          dy: -ShotSelectionGeometry.hitSlop).intersection(bounds),
-                      cursor: ShotSelectionCursor.cursor)
+                      cursor: selectionCommitted ? .arrow : ShotSelectionCursor.cursor)
         guard selectionCommitted else { return }
         let slop = ShotSelectionGeometry.hitSlop
         addCursorRect(CGRect(x: currentRect.minX + slop, y: currentRect.maxY - slop,
@@ -707,6 +707,10 @@ final class ShotOverlayView: NSView {
         if dragHit == .none,
            (abs(p.x - start.x) < ShotSelectionGeometry.minimumSize ||
             abs(p.y - start.y) < ShotSelectionGeometry.minimumSize) { return }
+        // While a tool is active the crop is fixed (resize via its edges); a
+        // stray drag on the backdrop must not start a new region and throw
+        // the drawings away.
+        if dragHit == .none, isEditing { return }
         if !dragging {
             guard abs(p.x - start.x) > 4 || abs(p.y - start.y) > 4 else { return }
             dragging = true
@@ -724,7 +728,7 @@ final class ShotOverlayView: NSView {
         switch dragHit {
         case .move:
             currentRect = ShotSelectionGeometry.moved(dragStartRect, delta: delta, within: bounds)
-            ShotSelectionCursor.cursor.set()
+            NSCursor.closedHand.set()
         case .resize(let handle):
             currentRect = ShotSelectionGeometry.resized(dragStartRect, handle: handle,
                                                         delta: delta, within: bounds)
@@ -807,7 +811,7 @@ final class ShotOverlayView: NSView {
 
     private func cursor(for hit: ShotSelectionHit) -> NSCursor {
         switch hit {
-        case .move: return ShotSelectionCursor.cursor
+        case .move: return .arrow
         case .resize(.north), .resize(.south): return .resizeUpDown
         case .resize(.east), .resize(.west): return .resizeLeftRight
         case .resize(.northWest), .resize(.southEast): return ShotSelectionCursor.resizeNorthWestSouthEast
@@ -821,6 +825,23 @@ final class ShotOverlayView: NSView {
         if let toolbar, !toolbar.isHidden, toolbar.frame.contains(point) { return false }
         guard hasLockedSelection else { return true }
         return ShotSelectionGeometry.hitTest(point, in: currentRect) == .none
+    }
+
+    /// An annotation tool is active: the selection is being edited. (With
+    /// no tool picked, a deliberate drag on the backdrop still reselects.)
+    private var isEditing: Bool {
+        hasLockedSelection && editorView?.currentTool != nil
+    }
+
+    /// Picking a tool (or any toolbar action) confirms the region like a click
+    /// inside it: handles show and the selection cursor turns into a pointer.
+    private func commitSelection() {
+        guard hasLockedSelection, !selectionCommitted else { return }
+        hoverActive = false
+        selectionCommitted = true
+        invalidateSelectionCursors()
+        onSelectionStateChanged?()
+        needsDisplay = true
     }
 
     func invalidateSelectionCursors() {
@@ -920,6 +941,7 @@ final class ShotOverlayView: NSView {
         if !scrollingMode { ensureEditor() }
         if toolbar == nil {
             let tb = ShotToolbarView(editor: editorView, scrollingMode: scrollingMode) { [weak self] action in
+                self?.commitSelection()
                 self?.confirm(action)
             }
             addSubview(tb)
@@ -964,6 +986,7 @@ final class ShotOverlayView: NSView {
         editor.onToolChanged = { [weak self] tool in
             guard let self else { return }
             self.toolbar?.highlightTool(tool)
+            if tool != nil { self.commitSelection() }
             // Tool deselected (right-click / clicking the active tool) → keys return to
             // the overlay so Enter / Space / colour-copy shortcuts work again.
             if tool == nil { self.window?.makeFirstResponder(self) }
@@ -1026,7 +1049,9 @@ final class ShotOverlayView: NSView {
             drawHint()
         }
 
-        if !hasSelection || startPoint == nil || (toolbar?.isHidden ?? true) {
+        // Guide lines help while choosing a region only; once the selection
+        // locks the screen is in editing state and the crosshair goes away.
+        if !hasLockedSelection {
             drawGuideLines(at: mouse)
         }
     }

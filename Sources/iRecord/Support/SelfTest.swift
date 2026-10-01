@@ -798,8 +798,11 @@ enum SelfTest {
             let edgePoint = CGPoint(x: 200 - ShotSelectionGeometry.hitSlop + 1, y: 350)
             let toolbarPoint = CGPoint(x: toolbar.frame.midX, y: toolbar.frame.midY)
             let initialEdgeCursor = autoSelection ? ShotSelectionCursor.cursor : NSCursor.resizeLeftRight
+            // A dragged region is committed on release (plain pointer inside);
+            // an auto-selection keeps the selection cursor until confirmed.
+            let initialInsideCursor = autoSelection ? ShotSelectionCursor.cursor : NSCursor.arrow
             guard view.cursor(at: outsidePoint) === ShotSelectionCursor.outsideCursor,
-                  view.cursor(at: insidePoint) === ShotSelectionCursor.cursor,
+                  view.cursor(at: insidePoint) == initialInsideCursor,
                   view.cursor(at: edgePoint) == initialEdgeCursor,
                   view.cursor(at: toolbarPoint) == NSCursor.arrow else {
                 print("[selectiontest] FAIL: selected region cursor routing (scrolling=\(scrolling), autoSelection=\(autoSelection))")
