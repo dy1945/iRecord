@@ -1546,8 +1546,9 @@ private final class ShotColorButton: NSButton {
         let widthRow = NSStackView(views: [widthLabel, widthPicker])
         widthRow.orientation = .horizontal
         widthRow.spacing = 12
-        widthLabel.widthAnchor.constraint(equalTo: sizeLabel.widthAnchor).isActive = true
         let stack = NSStackView(views: [colourRow, widthRow, sizeRow])
+        // Both labels now share an ancestor (`stack`), so the constraint is legal.
+        widthLabel.widthAnchor.constraint(equalTo: sizeLabel.widthAnchor).isActive = true
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
