@@ -1278,7 +1278,8 @@ final class ShotToolbarView: NSView {
             let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
             b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
                 .withSymbolConfiguration(config)
-            b.toolTip = tip
+            b.tipText = tip
+            b.setAccessibilityLabel(tip)
             b.imageScaling = .scaleNone
             b.isBordered = false
             b.contentTintColor = tint
@@ -1344,7 +1345,7 @@ final class ShotToolbarView: NSView {
                 ocr.title = "OCR"
                 ocr.font = .systemFont(ofSize: 12, weight: .semibold)
                 ocr.isBordered = false
-                ocr.toolTip = L10n.tr("Extract text from the original selection", "识别选区原始文字")
+                ocr.tipText = L10n.tr("Extract text from the original selection (OCR)", "识别选区原始文字 (OCR)")
                 ocr.setAccessibilityLabel("OCR")
                 ocr.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([
@@ -1441,6 +1442,9 @@ private final class ToolbarBorderView: NSView {
 private final class OverlayHandlerButton: NSButton {
     private let handler: () -> Void
     private var hoverArea: NSTrackingArea?
+    /// Shown by `HoverTip` — not `toolTip`: system tooltips draw below the
+    /// screen-saver-level overlay window and never become visible.
+    var tipText: String?
 
     init(handler: @escaping () -> Void) {
         self.handler = handler
@@ -1457,7 +1461,7 @@ private final class OverlayHandlerButton: NSButton {
         super.updateTrackingAreas()
         if let hoverArea { removeTrackingArea(hoverArea) }
         let area = NSTrackingArea(rect: bounds,
-                                  options: [.mouseEnteredAndExited, .activeInKeyWindow],
+                                  options: [.mouseEnteredAndExited, .activeAlways],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
         hoverArea = area
@@ -1465,13 +1469,97 @@ private final class OverlayHandlerButton: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+        HoverTip.shared.schedule(tipText, for: self)
     }
 
     override func mouseExited(with event: NSEvent) {
         layer?.backgroundColor = nil
+        HoverTip.shared.hide(for: self)
     }
 
-    @objc private func fire() { handler() }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { HoverTip.shared.hide(for: self) }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    @objc private func fire() {
+        HoverTip.shared.hide(for: self)
+        handler()
+    }
+}
+
+/// Hover hint bubble for toolbar buttons, drawn inside the button's own
+/// window: below the toolbar, or above it when there's no room.
+@MainActor
+final class HoverTip {
+    static let shared = HoverTip()
+    private var bubble: NSView?
+    private weak var owner: NSView?
+    private var pending: Task<Void, Never>?
+
+    func schedule(_ text: String?, for view: NSView) {
+        hide(for: nil)
+        guard let text, !text.isEmpty else { return }
+        owner = view
+        pending = Task { @MainActor [weak self, weak view] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled, let self, let view, self.owner === view else { return }
+            self.show(text, for: view)
+        }
+    }
+
+    /// Hides the bubble; with a view, only if that view owns it.
+    func hide(for view: NSView?) {
+        if let view, view !== owner { return }
+        pending?.cancel()
+        pending = nil
+        bubble?.removeFromSuperview()
+        bubble = nil
+        owner = nil
+    }
+
+    private func show(_ text: String, for view: NSView) {
+        guard let host = view.window?.contentView else { return }
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .white
+        label.sizeToFit()
+        let pad = NSSize(width: 9, height: 4)
+        let size = NSSize(width: label.frame.width + pad.width * 2, height: label.frame.height + pad.height * 2)
+        let box = TipBubbleView(frame: NSRect(origin: .zero, size: size))
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor(white: 0.08, alpha: 0.92).cgColor
+        box.layer?.cornerRadius = 6
+        box.layer?.borderWidth = 0.5
+        box.layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
+        label.setFrameOrigin(NSPoint(x: pad.width, y: pad.height))
+        box.addSubview(label)
+
+        // Place relative to the whole toolbar (or the button when standalone).
+        let anchorView = view.superview?.superview?.superview ?? view
+        let bar = anchorView.convert(anchorView.bounds, to: host)
+        let button = view.convert(view.bounds, to: host)
+        let gap: CGFloat = 6
+        var x = button.midX - size.width / 2
+        x = max(4, min(host.bounds.width - size.width - 4, x))
+        // Below = smaller y in a y-up host, larger y in a flipped one.
+        var y: CGFloat
+        if host.isFlipped {
+            y = bar.maxY + gap
+            if y + size.height > host.bounds.maxY - 4 { y = bar.minY - gap - size.height }
+        } else {
+            y = bar.minY - gap - size.height
+            if y < 4 { y = bar.maxY + gap }
+        }
+        box.setFrameOrigin(NSPoint(x: x, y: y))
+        host.addSubview(box, positioned: .above, relativeTo: nil)
+        bubble = box
+    }
+}
+
+/// Never takes clicks: the bubble may sit over the screenshot.
+private final class TipBubbleView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// A single current-colour button with a transient palette below the toolbar.
@@ -1480,6 +1568,26 @@ private final class ShotColorButton: NSButton {
     private let palette = NSPopover()
     private var sizePicker: NSSegmentedControl!
     private var widthPicker: NSSegmentedControl!
+    private let colourTip = L10n.tr("Colour, line width and text size", "颜色、线宽和字号")
+
+    private var hoverArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if !palette.isShown { HoverTip.shared.schedule(colourTip, for: self) }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        HoverTip.shared.hide(for: self)
+    }
 
     init(editor: AnnotationEditorView) {
         self.editor = editor
@@ -1489,8 +1597,7 @@ private final class ShotColorButton: NSButton {
         image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: L10n.tr("Annotation colour", "标注颜色"))?
             .withSymbolConfiguration(.init(pointSize: 19, weight: .regular))
         contentTintColor = editor.currentColor
-        toolTip = L10n.tr("Choose annotation colour", "选择标注颜色")
-        setAccessibilityLabel(toolTip)
+        setAccessibilityLabel(colourTip)
         target = self
         action = #selector(togglePalette)
         translatesAutoresizingMaskIntoConstraints = false
@@ -1585,6 +1692,7 @@ private final class ShotColorButton: NSButton {
     }
 
     @objc private func togglePalette() {
+        HoverTip.shared.hide(for: self)
         syncPickers()
         if palette.isShown {
             palette.performClose(nil)
@@ -1594,7 +1702,10 @@ private final class ShotColorButton: NSButton {
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if newWindow == nil { palette.performClose(nil) }
+        if newWindow == nil {
+            palette.performClose(nil)
+            HoverTip.shared.hide(for: self)
+        }
         super.viewWillMove(toWindow: newWindow)
     }
 }
