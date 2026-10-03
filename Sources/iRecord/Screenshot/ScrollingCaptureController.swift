@@ -2,8 +2,10 @@ import AppKit
 import CoreGraphics
 
 /// iShot-style scrolling screenshot (长截图): after the user picks a region,
-/// captures it ~6×/s while they scroll (wheel / trackpad / auto-scroll button),
+/// captures it ~8×/s while they scroll (wheel / trackpad / auto-scroll button),
 /// stitches frames vertically, and shows a live preview beside the region.
+/// The first movement decides the direction: scrolling down extends the image
+/// downwards, scrolling up extends it upwards.
 ///
 /// Stop conditions: Enter / ■ button / Esc (cancel) / no movement for 2.5 s
 /// after scrolling started / max length reached. The finished long image opens
@@ -15,6 +17,8 @@ final class ScrollingCaptureController {
     private var globalRect: CGRect = .zero
     private var timer: Timer?
     private var stitcher: ImageStitcher?
+    /// Upward candidate, kept only until the first movement picks a direction.
+    private var upStitcher: ImageStitcher?
     private var lastFrame: CGImage?
     private var stillCount = 0
     private var didScroll = false
@@ -51,12 +55,18 @@ final class ScrollingCaptureController {
     }
 
     private func beginCapture() {
-        guard let first = grab(),
-              let stitcher = ImageStitcher(firstFrame: first) else {
+        guard let first = grab() else {
+            NSSound.beep()
+            return
+        }
+        // Overlay scrollers are ~16 pt wide at the right edge.
+        let band = Int((16 * CGFloat(first.height) / max(1, globalRect.height)).rounded())
+        guard let stitcher = ImageStitcher(firstFrame: first, scrollbarBand: band) else {
             NSSound.beep()
             return
         }
         self.stitcher = stitcher
+        self.upStitcher = ImageStitcher(firstFrame: first, reversed: true, scrollbarBand: band)
         self.lastFrame = first
 
         showHUD()
@@ -79,16 +89,29 @@ final class ScrollingCaptureController {
 
     private func tick() {
         guard let frame = grab() else { return }
-        guard let stitcher else { return }
+        guard var stitcher else { return }
 
-        guard let match = stitcher.append(frame) else {
-            status("Couldn't match — scroll more slowly", warn: true)
+        var result = stitcher.append(frame)
+        if let up = upStitcher {
+            if let r = result, r.dy > 0 {
+                upStitcher = nil                      // scrolling down
+            } else if let r = up.append(frame), r.dy > 0 {
+                stitcher = up                         // scrolling up
+                self.stitcher = up
+                upStitcher = nil
+                result = r
+            }
+        }
+        guard let match = result else {
+            status(L10n.tr("Couldn't match — scroll more slowly, or back to where you were",
+                           "无法衔接 — 请滚慢一点，或滚回上次的位置"), warn: true)
             return
         }
         lastFrame = frame
 
         if match.dx != 0 {
-            abort("Horizontal scrolling detected — capture aborted.")
+            abort(L10n.tr("Horizontal scrolling detected — capture aborted.",
+                          "检测到横向滚动，已停止长截图。"))
             return
         }
 
@@ -113,16 +136,19 @@ final class ScrollingCaptureController {
             }
         }
 
+        let arrow = stitcher.reversed ? "↑" : "↓"
         status(didScroll
-               ? "Stitching… \(stitcher.stitchedHeight) px — Enter to finish"
-               : "Scroll the content (wheel / trackpad)…")
+               ? L10n.tr("\(arrow) Stitching… \(stitcher.stitchedHeight) px — Enter to finish",
+                         "\(arrow) 拼接中… \(stitcher.stitchedHeight) px — 回车完成")
+               : L10n.tr("Scroll the content up or down (wheel / trackpad)…",
+                         "向上或向下滚动内容（滚轮 / 触控板）…"))
         if autoScroll { postScrollEvent() }
     }
 
     // MARK: - Finish / cancel
 
     private func finish() {
-        guard timer != nil, let image = stitcher?.currentImage else { teardown(); return }
+        guard timer != nil, let image = stitcher?.finalImage else { teardown(); return }
         let scale = CGFloat(lastFrame?.height ?? Int(globalRect.height)) / globalRect.height
         let nsImage = NSImage(cgImage: image, size: NSSize(
             width: CGFloat(image.width) / scale,
@@ -157,6 +183,7 @@ final class ScrollingCaptureController {
         previewView = nil
         statusField = nil
         stitcher = nil
+        upStitcher = nil
         lastFrame = nil
         autoScroll = false
     }
@@ -179,7 +206,8 @@ final class ScrollingCaptureController {
             let trusted = AXIsProcessTrustedWithOptions(
                 [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
             if !trusted {
-                status("Grant Accessibility permission, then try Auto again", warn: true)
+                status(L10n.tr("Grant Accessibility permission, then try Auto again",
+                              "请先授予辅助功能权限，再开启自动滚动"), warn: true)
                 return
             }
             autoScroll = true
@@ -215,8 +243,8 @@ final class ScrollingCaptureController {
         bar.layer?.backgroundColor = NSColor(white: 0.1, alpha: 0.92).cgColor
         bar.layer?.cornerRadius = 10
 
-        let label = NSTextField(labelWithString: L10n.tr("Scroll the content (wheel / trackpad)…",
-                                                         "滚动内容（滚轮 / 触控板）…"))
+        let label = NSTextField(labelWithString: L10n.tr("Scroll the content up or down (wheel / trackpad)…",
+                                                         "向上或向下滚动内容（滚轮 / 触控板）…"))
         label.textColor = .white
         label.font = .systemFont(ofSize: 12, weight: .medium)
         label.lineBreakMode = .byTruncatingTail

@@ -16,6 +16,15 @@ import Foundation
 /// probe (otherwise they drag the match towards dy = 0) and out of the appended
 /// strips (otherwise they repeat every few hundred pixels); the footer of the
 /// last frame is added once at the very bottom of the result.
+///
+/// Scrolling up is the same problem upside down: a `reversed` stitcher flips
+/// every frame vertically on the way in (a sticky header becomes a sticky
+/// footer) and flips the result back on the way out.
+///
+/// Overlay scrollbars float over the right edge while scrolling. Each content
+/// row is seen in several frames at different screen heights, and the knob
+/// covers it in only a few of them, so the final image takes the per-pixel
+/// median of those observations across a `scrollbarBand` at the right edge.
 final class ImageStitcher {
 
     struct MatchResult {
@@ -40,32 +49,69 @@ final class ImageStitcher {
     /// below are the (possibly sticky) tail that is only added on output.
     private var contentBottom: Int
     private(set) var frameCount = 0
+    let reversed: Bool
 
-    init?(firstFrame: CGImage) {
+    /// Right-edge strip of one accepted frame: frame row k is canvas row
+    /// `canvasOffset + k` for k < `rows`.
+    private struct BandSample {
+        var bytes: [UInt8]
+        var canvasOffset: Int
+        var rows: Int
+    }
+    private let bandWidth: Int
+    private var bandSamples: [BandSample] = []
+
+    init?(firstFrame: CGImage, reversed: Bool = false, scrollbarBand: Int = 0) {
         width = firstFrame.width
         height = firstFrame.height
         bytesPerRow = width * 4
+        self.reversed = reversed
+        bandWidth = max(0, min(scrollbarBand, firstFrame.width / 4))
         guard width > 16, height > 64,
-              let frame = ImageStitcher.decode(firstFrame) else { return nil }
+              let frame = ImageStitcher.decode(firstFrame, flipped: reversed) else { return nil }
         prev = frame
         pixels = frame.bgra
         rowCount = height
         contentBottom = height
         frameCount = 1
+        recordBand(of: frame, canvasOffset: 0, rows: height)
     }
 
     /// Stitched image including the sticky tail of the last frame.
-    var currentImage: CGImage? {
+    var currentImage: CGImage? { makeImage(cleanScrollbar: false) }
+
+    /// Final result: like `currentImage`, with the scrollbar band cleaned.
+    var finalImage: CGImage? { makeImage(cleanScrollbar: true) }
+
+    private func makeImage(cleanScrollbar: Bool) -> CGImage? {
         let tail = height - contentBottom
-        var data = Data(capacity: (rowCount + tail) * bytesPerRow)
-        pixels.withUnsafeBufferPointer { data.append($0.baseAddress!, count: rowCount * bytesPerRow) }
-        if tail > 0 {
-            prev.bgra.withUnsafeBufferPointer {
-                data.append($0.baseAddress! + contentBottom * bytesPerRow, count: tail * bytesPerRow)
+        let total = rowCount + tail
+        var out = [UInt8](repeating: 0, count: total * bytesPerRow)
+        out.withUnsafeMutableBufferPointer { dst in
+            pixels.withUnsafeBufferPointer { src in
+                UnsafeMutableRawPointer(dst.baseAddress!)
+                    .copyMemory(from: src.baseAddress!, byteCount: rowCount * bytesPerRow)
+            }
+            if tail > 0 {
+                prev.bgra.withUnsafeBufferPointer { src in
+                    UnsafeMutableRawPointer(dst.baseAddress! + rowCount * bytesPerRow)
+                        .copyMemory(from: src.baseAddress! + contentBottom * bytesPerRow, byteCount: tail * bytesPerRow)
+                }
+            }
+        }
+        if cleanScrollbar { cleanScrollbarBand(in: &out) }
+        var data = Data(capacity: total * bytesPerRow)
+        out.withUnsafeBufferPointer { buf in
+            if reversed {
+                for row in stride(from: total - 1, through: 0, by: -1) {
+                    data.append(buf.baseAddress! + row * bytesPerRow, count: bytesPerRow)
+                }
+            } else {
+                data.append(buf.baseAddress!, count: total * bytesPerRow)
             }
         }
         guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-        return CGImage(width: width, height: rowCount + tail,
+        return CGImage(width: width, height: total,
                        bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow,
                        space: CGColorSpaceCreateDeviceRGB(),
                        bitmapInfo: CGBitmapInfo(rawValue: ImageStitcher.bitmapInfo),
@@ -80,7 +126,7 @@ final class ImageStitcher {
     @discardableResult
     func append(_ frame: CGImage) -> MatchResult? {
         guard frame.width == width, frame.height == height,
-              let new = ImageStitcher.decode(frame) else { return nil }
+              let new = ImageStitcher.decode(frame, flipped: reversed) else { return nil }
 
         // Quick identity check: unchanged frame → dy 0.
         if ImageStitcher.meanAbsDiff(prev.gray, new.gray, width: width, height: height) < 0.7 {
@@ -105,6 +151,10 @@ final class ImageStitcher {
 
         // Drop any canvas rows that turned out to be footer, then append the
         // content the scroll revealed: new-frame rows [bottom - dy, contentEnd).
+        if var last = bandSamples.popLast() {
+            last.rows = min(last.rows, bottom)       // its rows below `bottom` were footer
+            bandSamples.append(last)
+        }
         rowCount -= contentBottom - bottom
         let start = bottom - match.dy
         pixels.removeSubrange((rowCount * bytesPerRow)...)
@@ -113,7 +163,59 @@ final class ImageStitcher {
         contentBottom = contentEnd
         prev = new
         frameCount += 1
+        recordBand(of: new, canvasOffset: rowCount - contentEnd, rows: contentEnd)
         return match
+    }
+
+    // MARK: - Scrollbar band
+
+    private func recordBand(of frame: Frame, canvasOffset: Int, rows: Int) {
+        guard bandWidth > 0 else { return }
+        let bandBytes = bandWidth * 4
+        var bytes = [UInt8](repeating: 0, count: height * bandBytes)
+        frame.bgra.withUnsafeBufferPointer { src in
+            bytes.withUnsafeMutableBufferPointer { dst in
+                for row in 0..<height {
+                    UnsafeMutableRawPointer(dst.baseAddress! + row * bandBytes)
+                        .copyMemory(from: src.baseAddress! + row * bytesPerRow + (width - bandWidth) * 4,
+                                    byteCount: bandBytes)
+                }
+            }
+        }
+        bandSamples.append(BandSample(bytes: bytes, canvasOffset: canvasOffset, rows: rows))
+    }
+
+    /// Replaces each band pixel with the median (by luminance) of every
+    /// observation of that content pixel. Rows seen fewer than 3 times keep
+    /// their pixels — there is no majority to trust.
+    private func cleanScrollbarBand(in out: inout [UInt8]) {
+        guard bandWidth > 0, bandSamples.count >= 3 else { return }
+        let bandBytes = bandWidth * 4
+        var candidates: [(lum: Int, sample: Int, row: Int)] = []
+        out.withUnsafeMutableBufferPointer { dst in
+            for canvasRow in 0..<rowCount {
+                var seen: [(sample: Int, row: Int)] = []
+                for (i, s) in bandSamples.enumerated() {
+                    let k = canvasRow - s.canvasOffset
+                    if k >= 0, k < s.rows { seen.append((i, k)) }
+                }
+                guard seen.count >= 3 else { continue }
+                let rowBase = canvasRow * bytesPerRow + (width - bandWidth) * 4
+                for x in 0..<bandWidth {
+                    candidates.removeAll(keepingCapacity: true)
+                    for (i, k) in seen {
+                        let off = k * bandBytes + x * 4
+                        let b = bandSamples[i].bytes
+                        let lum = Int(b[off]) * 29 + Int(b[off + 1]) * 150 + Int(b[off + 2]) * 77
+                        candidates.append((lum, i, k))
+                    }
+                    candidates.sort { $0.lum < $1.lum }
+                    let pick = candidates[candidates.count / 2]
+                    let off = pick.row * bandBytes + x * 4
+                    for c in 0..<4 { dst[rowBase + x * 4 + c] = bandSamples[pick.sample].bytes[off + c] }
+                }
+            }
+        }
     }
 
     // MARK: - Matching
@@ -209,7 +311,7 @@ final class ImageStitcher {
     /// Normalizes a frame by redrawing it into a tightly packed bitmap (so
     /// cropped sub-images, whose data provider shares the parent's buffer,
     /// read right) and derives its luminance.
-    private static func decode(_ image: CGImage) -> Frame? {
+    private static func decode(_ image: CGImage, flipped: Bool = false) -> Frame? {
         let w = image.width, h = image.height
         var bgra = [UInt8](repeating: 0, count: w * h * 4)
         let drew = bgra.withUnsafeMutableBytes { raw -> Bool in
@@ -217,6 +319,10 @@ final class ImageStitcher {
                                       bitsPerComponent: 8, bytesPerRow: w * 4,
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: bitmapInfo) else { return false }
+            if flipped {
+                ctx.translateBy(x: 0, y: CGFloat(h))
+                ctx.scaleBy(x: 1, y: -1)
+            }
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
             return true
         }

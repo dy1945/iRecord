@@ -257,12 +257,15 @@ enum SelfTest {
     /// sizes, including a fast jump and a no-move frame), stitches them, and
     /// verifies the result reconstructs the page pixel-accurately. A second
     /// pass overlays a sticky header and footer (like a chat input bar), which
-    /// must appear exactly once in the result.
+    /// must appear exactly once in the result; one scrolls the page upwards;
+    /// one draws a moving overlay-scrollbar knob that must not survive.
     /// `iRecord --stitchtest`
     static func runStitch() -> Never {
         let plain = stitchScenario(name: "plain", frameH: 480, headerH: 0, footerH: 0)
         let sticky = stitchScenario(name: "sticky header/footer", frameH: 600, headerH: 40, footerH: 70)
-        if plain && sticky {
+        let upward = stitchScenario(name: "scrolling up", frameH: 480, headerH: 0, footerH: 0, upward: true)
+        let knob = stitchScenario(name: "overlay scrollbar", frameH: 480, headerH: 0, footerH: 0, knob: true)
+        if plain && sticky && upward && knob {
             print("[stitchtest] PASS ✅  stitched image reconstructs the page exactly")
             exit(0)
         }
@@ -270,7 +273,8 @@ enum SelfTest {
         exit(6)
     }
 
-    private static func stitchScenario(name: String, frameH: Int, headerH: Int, footerH: Int) -> Bool {
+    private static func stitchScenario(name: String, frameH: Int, headerH: Int, footerH: Int,
+                                       upward: Bool = false, knob: Bool = false) -> Bool {
         let pageW = 320, pageH = 3000
         guard let page = syntheticPage(width: pageW, height: pageH) else {
             print("[stitchtest] \(name): could not build synthetic page"); return false
@@ -278,7 +282,7 @@ enum SelfTest {
 
         func frame(atTop top: Int) -> CGImage? {
             guard let crop = page.cropping(to: CGRect(x: 0, y: top, width: pageW, height: frameH)) else { return nil }
-            if headerH == 0 && footerH == 0 { return crop }
+            if headerH == 0 && footerH == 0 && !knob { return crop }
             guard let ctx = CGContext(data: nil, width: pageW, height: frameH,
                                       bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpaceCreateDeviceRGB(),
@@ -292,6 +296,12 @@ enum SelfTest {
             ctx.fill(CGRect(x: 0, y: 0, width: pageW, height: footerH))
             ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
             ctx.fill(CGRect(x: 20, y: footerH / 3, width: pageW - 80, height: footerH / 3))
+            if knob {
+                // Knob moves down the right edge as the page scrolls.
+                let k = 20 + Int(Double(top) / Double(pageH - frameH) * Double(frameH - 100))
+                ctx.setFillColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1)
+                ctx.fill(CGRect(x: pageW - 12, y: frameH - k - 60, width: 8, height: 60))
+            }
             return ctx.makeImage()
         }
 
@@ -305,8 +315,10 @@ enum SelfTest {
             tops.append(min(y, pageH - frameH))
         }
         tops.append(tops.last!)    // no-movement frame at the end
+        if upward { tops.reverse() }
 
-        guard let first = frame(atTop: 0), let stitcher = ImageStitcher(firstFrame: first) else {
+        guard let first = frame(atTop: tops[0]),
+              let stitcher = ImageStitcher(firstFrame: first, reversed: upward, scrollbarBand: knob ? 16 : 0) else {
             print("[stitchtest] \(name): init failed"); return false
         }
         var matched = 0
@@ -316,8 +328,8 @@ enum SelfTest {
             if let m = stitcher.append(f) {
                 if m.dy > 0 {
                     matched += 1
-                    if m.dy != top - prevTop {
-                        print("[stitchtest] \(name) frame \(idx): dy=\(m.dy) actual=\(top - prevTop)  ⚠️")
+                    if m.dy != abs(top - prevTop) {
+                        print("[stitchtest] \(name) frame \(idx): dy=\(m.dy) actual=\(abs(top - prevTop))  ⚠️")
                     }
                 }
                 prevTop = top
@@ -326,10 +338,11 @@ enum SelfTest {
             }
         }
 
-        guard let result = stitcher.currentImage, let last = frame(atTop: tops.last!) else {
+        // The bottom of the result is the frame scrolled furthest down.
+        guard let result = stitcher.finalImage, let last = frame(atTop: tops.max()!) else {
             print("[stitchtest] \(name): no result"); return false
         }
-        let expectedH = frameH + (tops.last! - 0)
+        let expectedH = frameH + (tops.max()! - tops.min()!)
         print("[stitchtest] \(name): frames=\(tops.count) stitchedH=\(result.height) expectedH=\(expectedH) appended=\(matched)")
 
         // Verify content: rows between the sticky bands must equal the page;

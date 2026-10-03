@@ -687,6 +687,10 @@ final class ShotOverlayView: NSView {
 
     private func isCopyCompletionPoint(_ point: CGPoint) -> Bool {
         if let toolbar, !toolbar.isHidden, toolbar.frame.contains(point) { return false }
+        // Double-clicking a committed text or marker caption edits it again.
+        if let editorView, editorView.isEditableAnnotation(at: editorView.convert(point, from: self)) {
+            return false
+        }
         if isOutsideSelection(at: point) { return true }
         return hasLockedSelection && ShotSelectionGeometry.hitTest(point, in: currentRect) == .move
     }
@@ -869,6 +873,20 @@ final class ShotOverlayView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if let editorView {
+            // Keys the canvas didn't take (no tool active): undo/redo, and
+            // number keys that pick a tool.
+            if mods.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z" {
+                if mods.contains(.shift) { editorView.redo() } else { editorView.undo() }
+                return
+            }
+            if editorView.selectTool(for: event) { return }
+        }
+        if (123...126).contains(Int(event.keyCode)), hasLockedSelection {
+            nudgeSelection(event)
+            return
+        }
         switch event.keyCode {
         case 53: onAction?(.zero, .cancel)   // Esc
         case 36, 76: confirm(scrollingMode ? .scrolling : .copy)   // Enter
@@ -884,16 +902,61 @@ final class ShotOverlayView: NSView {
         }
     }
 
-    /// Samples the frozen pixel under the cursor and copies it to the clipboard.
-    private func copyColorAtMouse(hex: Bool) {
+    /// Arrow keys move the locked selection by 1 px (⇧: 10 px); with ⌥ they
+    /// resize it from the bottom-right (→/↓ grow, ←/↑ shrink).
+    private func nudgeSelection(_ event: NSEvent) {
+        let mods = event.modifierFlags
+        let step: CGFloat = mods.contains(.shift) ? 10 : 1
+        let resize = mods.contains(.option)
+        let minSide = ShotSelectionGeometry.minimumSize
+        var r = currentRect
+        switch event.keyCode {
+        case 123: if resize { r.size.width = max(minSide, r.width - step) } else { r.origin.x -= step }
+        case 124: if resize { r.size.width += step } else { r.origin.x += step }
+        case 125:                                   // ↓ (view is y-up)
+            if resize { r.origin.y -= step; r.size.height += step } else { r.origin.y -= step }
+        case 126:                                   // ↑
+            if resize {
+                let h = max(minSide, r.height - step)
+                r.origin.y += r.height - h
+                r.size.height = h
+            } else {
+                r.origin.y += step
+            }
+        default: return
+        }
+        if resize {
+            r = r.intersection(bounds)
+            guard r.width >= minSide, r.height >= minSide else { return }
+        } else {
+            r.origin.x = max(0, min(bounds.width - r.width, r.origin.x))
+            r.origin.y = max(0, min(bounds.height - r.height, r.origin.y))
+        }
+        guard r != currentRect else { return }
+        currentRect = r
+        commitSelection()
+        if let editorView { updateEditorCrop(for: editorView) }
+        layoutToolbar()
+        invalidateSelectionCursors()
+        needsDisplay = true
+    }
+
+    /// The frozen pixel under a view point, as 8-bit RGB.
+    private func pixelColor(at p: CGPoint) -> (r: UInt8, g: UInt8, b: UInt8)? {
         let scale = frozen.scale
-        let px = Int((mouse.x * scale).rounded())
-        let py = Int(((bounds.height - mouse.y) * scale).rounded())
+        let px = Int((p.x * scale).rounded(.down))
+        let py = Int(((bounds.height - p.y) * scale).rounded(.down))
         guard let data = frozen.image.dataProvider?.data,
               let base = CFDataGetBytePtr(data),
-              px >= 0, px < frozen.image.width, py >= 0, py < frozen.image.height else { return }
+              px >= 0, px < frozen.image.width, py >= 0, py < frozen.image.height else { return nil }
         let off = py * frozen.image.bytesPerRow + px * 4
-        let b = base[off], g = base[off + 1], r = base[off + 2]
+        return (base[off + 2], base[off + 1], base[off])
+    }
+
+    /// Samples the frozen pixel under the cursor and copies it to the clipboard.
+    private func copyColorAtMouse(hex: Bool) {
+        guard let c = pixelColor(at: mouse) else { return }
+        let (r, g, b) = (c.r, c.g, c.b)
         let str = hex ? String(format: "#%02X%02X%02X", r, g, b)
                       : String(format: "rgb(%d, %d, %d)", r, g, b)
         NSPasteboard.general.clearContents()
@@ -1059,6 +1122,78 @@ final class ShotOverlayView: NSView {
         if !hasLockedSelection {
             drawGuideLines(at: mouse)
         }
+        // Magnifier while choosing a region or dragging one of its edges.
+        var resizing = false
+        if dragging, case .resize = dragHit { resizing = true }
+        if !hasLockedSelection || resizing {
+            drawLoupe(at: mouse)
+        }
+    }
+
+    /// Pixel magnifier beside the cursor (iShot 放大镜): 15×15 frozen pixels
+    /// at 8×, the cursor pixel outlined, plus its position and colour — the
+    /// colour R / H copy.
+    private func drawLoupe(at p: CGPoint) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let cells = 15, half = 7
+        let zoom: CGFloat = 8
+        let side = CGFloat(cells) * zoom
+        let infoH: CGFloat = 42
+        let scale = frozen.scale
+        let cx = Int((p.x * scale).rounded(.down))
+        let cy = Int(((bounds.height - p.y) * scale).rounded(.down))
+        let src = CGRect(x: cx - half, y: cy - half, width: cells, height: cells)
+        let clipped = src.intersection(CGRect(x: 0, y: 0, width: frozen.image.width, height: frozen.image.height))
+        guard !clipped.isEmpty, let piece = frozen.image.cropping(to: clipped) else { return }
+
+        // Below-right of the cursor; flipped to stay on this display.
+        var origin = CGPoint(x: p.x + 22, y: p.y - 22 - side - infoH)
+        if origin.x + side > bounds.maxX - 4 { origin.x = p.x - 22 - side }
+        if origin.y < 4 { origin.y = p.y + 22 }
+        let box = CGRect(x: origin.x, y: origin.y + infoH, width: side, height: side)
+
+        ctx.saveGState()
+        NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6).addClip()
+        NSColor.black.setFill()
+        box.fill()
+        ctx.interpolationQuality = .none
+        // Image rows run top-down; this view is y-up.
+        let dest = CGRect(x: box.minX + (clipped.minX - src.minX) * zoom,
+                          y: box.maxY - (clipped.minY - src.minY) * zoom - clipped.height * zoom,
+                          width: clipped.width * zoom, height: clipped.height * zoom)
+        ctx.draw(piece, in: dest)
+        let centre = CGRect(x: box.minX + CGFloat(half) * zoom, y: box.maxY - CGFloat(half + 1) * zoom,
+                            width: zoom, height: zoom)
+        NSColor.systemBlue.withAlphaComponent(0.25).setFill()
+        CGRect(x: box.minX, y: centre.minY, width: side, height: zoom).fill()
+        CGRect(x: centre.minX, y: box.minY, width: zoom, height: side).fill()
+        ctx.restoreGState()
+        NSColor.white.setStroke()
+        let cell = NSBezierPath(rect: centre)
+        cell.lineWidth = 1
+        cell.stroke()
+        let frame = NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6)
+        frame.lineWidth = 1.5
+        frame.stroke()
+
+        let info = CGRect(x: box.minX, y: origin.y, width: side, height: infoH - 4)
+        NSColor.black.withAlphaComponent(0.75).setFill()
+        NSBezierPath(roundedRect: info, xRadius: 6, yRadius: 6).fill()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white
+        ]
+        ("\(cx), \(cy)" as NSString).draw(at: NSPoint(x: info.minX + 8, y: info.maxY - 18), withAttributes: attrs)
+        if let c = pixelColor(at: p) {
+            let (r, g, b) = (c.r, c.g, c.b)
+            let swatch = CGRect(x: info.minX + 8, y: info.minY + 5, width: 12, height: 12)
+            NSColor(srgbRed: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1).setFill()
+            swatch.fill()
+            NSColor.white.withAlphaComponent(0.7).setStroke()
+            NSBezierPath(rect: swatch).stroke()
+            (String(format: "#%02X%02X%02X", r, g, b) as NSString)
+                .draw(at: NSPoint(x: swatch.maxX + 6, y: info.minY + 3), withAttributes: attrs)
+        }
     }
 
     /// Full-screen crosshair guide lines through the cursor (iShot 辅助十字线).
@@ -1197,6 +1332,7 @@ final class ShotToolbarView: NSView {
 
             views.append(separator())
             views.append(iconButton("arrow.uturn.left", L10n.tr("Undo (⌘Z)", "撤销 (⌘Z)")) { [weak editor] in editor?.undo() })
+            views.append(iconButton("arrow.uturn.right", L10n.tr("Redo (⇧⌘Z)", "重做 (⇧⌘Z)")) { [weak editor] in editor?.redo() })
 
             views.append(separator())
             if captureActions {
@@ -1343,6 +1479,7 @@ private final class ShotColorButton: NSButton {
     private weak var editor: AnnotationEditorView?
     private let palette = NSPopover()
     private var sizePicker: NSSegmentedControl!
+    private var widthPicker: NSSegmentedControl!
 
     init(editor: AnnotationEditorView) {
         self.editor = editor
@@ -1397,15 +1534,25 @@ private final class ShotColorButton: NSButton {
         for (i, size) in AnnotationEditorView.textSizes.enumerated() {
             sizePicker.setToolTip("\(Int(size)) pt", forSegment: i)
         }
-        syncSizePicker()
-        let sizeRow = NSStackView(views: [NSTextField(labelWithString: L10n.tr("Text", "文字")), sizePicker])
+        widthPicker = NSSegmentedControl(labels: [L10n.tr("Thin", "细"), L10n.tr("Medium", "中"), L10n.tr("Thick", "粗")],
+                                        trackingMode: .selectOne, target: self, action: #selector(changeWidth))
+        widthPicker.setAccessibilityLabel(L10n.tr("Line width", "线宽"))
+        syncPickers()
+        let sizeLabel = NSTextField(labelWithString: L10n.tr("Text", "文字"))
+        let widthLabel = NSTextField(labelWithString: L10n.tr("Line", "线宽"))
+        let sizeRow = NSStackView(views: [sizeLabel, sizePicker])
         sizeRow.orientation = .horizontal
         sizeRow.spacing = 12
-        let stack = NSStackView(views: [colourRow, sizeRow])
+        let widthRow = NSStackView(views: [widthLabel, widthPicker])
+        widthRow.orientation = .horizontal
+        widthRow.spacing = 12
+        widthLabel.widthAnchor.constraint(equalTo: sizeLabel.widthAnchor).isActive = true
+        let stack = NSStackView(views: [colourRow, widthRow, sizeRow])
         stack.orientation = .vertical
+        stack.alignment = .leading
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
-        stack.frame = NSRect(x: 0, y: 0, width: 196, height: 84)
+        stack.frame = NSRect(x: 0, y: 0, width: 196, height: 120)
         let controller = NSViewController()
         controller.view = stack
         palette.contentViewController = controller
@@ -1421,15 +1568,23 @@ private final class ShotColorButton: NSButton {
         palette.performClose(nil)
     }
 
-    /// Selects the segment closest to the editor's current text size.
-    private func syncSizePicker() {
-        let current = editor?.currentTextSize ?? 20
-        let sizes = AnnotationEditorView.textSizes
-        sizePicker.selectedSegment = sizes.indices.min(by: { abs(sizes[$0] - current) < abs(sizes[$1] - current) }) ?? 1
+    @objc private func changeWidth() {
+        let widths = AnnotationEditorView.widths
+        editor?.currentWidth = widths[max(0, min(widths.count - 1, widthPicker.selectedSegment))]
+        palette.performClose(nil)
+    }
+
+    /// Selects the segments closest to the editor's current size and width.
+    private func syncPickers() {
+        func nearest(_ values: [CGFloat], _ current: CGFloat) -> Int {
+            values.indices.min(by: { abs(values[$0] - current) < abs(values[$1] - current) }) ?? 1
+        }
+        sizePicker.selectedSegment = nearest(AnnotationEditorView.textSizes, editor?.currentTextSize ?? 20)
+        widthPicker.selectedSegment = nearest(AnnotationEditorView.widths, editor?.currentWidth ?? 4.5)
     }
 
     @objc private func togglePalette() {
-        syncSizePicker()
+        syncPickers()
         if palette.isShown {
             palette.performClose(nil)
         } else {

@@ -53,26 +53,33 @@ Recording has two stages:
 Capture, annotate and extract text alongside recording:
 
 - **Region screenshot** — freezes every display, with a visible arrow cursor,
-  full-screen guide lines and a live `W × H` readout. Resize a selection from
-  its edges or drag inside it to move it. The floating toolbar offers
+  full-screen guide lines, a pixel **magnifier** (position + colour) and a
+  live `W × H` readout while choosing. Resize a selection from its edges or
+  drag inside it to move it; **arrow keys** move it 1 px (⇧ 10 px), **⌥ +
+  arrows** resize it. The floating toolbar offers
   **annotations · long screenshot · pin · OCR · copy · save · cancel**.
   Keys: **Enter** copy · **Space** save · **S** scrolling · **T** pin ·
-  **R / H** copy pixel RGB / HEX · **Esc** discard. Double-click inside or
+  **1–9, 0** pick a tool · **R / H** copy pixel RGB / HEX · **Esc** discard. Double-click inside or
   outside the selected area to copy the screenshot, including annotations,
   and exit with a confirmation toast. When local saving is enabled, the same
   image is also saved to the configured folder. An accidental single click
   outside the selection keeps the screenshot open.
 - **Scrolling screenshot (长截图)** — pick the scrollable region, then scroll
-  (wheel / trackpad / auto-scroll button). Frames are captured ~6×/s and
-  stitched pixel-accurately by template matching — works in *any* app, not
-  just browsers. A live preview grows beside the region; Enter finishes,
-  no-movement auto-stops, horizontal scroll aborts. The result opens in the
-  annotation editor.
-- **Annotation editor (截屏编辑)** — line · arrow · rectangle · ellipse ·
-  numbered marker · **mosaic** (pixel-block) · text, with ⌘Z undo.
-  The screenshot toolbar uses one colour button; its popup offers five preset
-  colours and **Small (20 pt) / Large (30 pt)** text sizes. Flattened output
-  can be saved, copied or pinned.
+  down or up (wheel / trackpad / auto-scroll button). Frames are captured
+  ~8×/s and stitched pixel-accurately by template matching — works in *any*
+  app, not just browsers. Sticky footers appear once, and overlay scrollbar
+  knobs are removed from the result. A live preview grows beside the region;
+  Enter finishes, no-movement auto-stops, horizontal scroll aborts. The
+  result opens in the annotation editor (fit-to-window / 100% zoom, pinch).
+- **Annotation editor (截屏编辑)** — rectangle · ellipse · arrow · line ·
+  pen · highlighter · numbered marker (caption with a leader line) ·
+  **mosaic** · **blur** · text; ⌘Z undo / ⇧⌘Z redo for every change.
+  Click an annotation to select it: **Delete** removes it (markers renumber),
+  arrow keys nudge it, colour / width / size changes restyle it.
+  Double-click a text or marker caption to edit it again.
+  The colour button's popup offers five preset colours, **Thin / Medium /
+  Thick** lines and **Small / Medium / Large** (14 / 20 / 30 pt) text.
+  Flattened output can be saved, copied or pinned.
 - **OCR** — extracts Chinese and English text from the original frozen
   selection using Apple Vision, without annotation interference. Results
   preserve line breaks and can be edited before **Copy All**. If no text is
