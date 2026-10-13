@@ -14,15 +14,20 @@ final class PinWindowController {
     static let shared = PinWindowController()
     private(set) var pins: [PinWindow] = []
 
-    /// Pins an image near the top-right of the main screen (iShot behaviour),
-    /// cascading when several pins exist.
-    func pin(image: NSImage) {
-        let win = PinWindow(image: image)
+    /// Pins an image. With `globalRect` (a screenshot's own area, Cocoa
+    /// global coords) the pin opens at 100 % exactly over the spot it was
+    /// captured from, like iShot — so it lines up with the screen and can be
+    /// screenshotted again. Otherwise it opens near the top-right of the main
+    /// screen, cascading when several pins exist.
+    func pin(image: NSImage, at globalRect: CGRect? = nil) {
+        let win = PinWindow(image: image, fitToScreen: globalRect == nil)
         win.onClose = { [weak self, weak win] in
             guard let win else { return }
             self?.pins.removeAll { $0 === win }
         }
-        if let screen = NSScreen.main {
+        if let globalRect, globalRect.width >= 1, globalRect.height >= 1 {
+            win.setFrame(NSRect(origin: globalRect.origin, size: image.size), display: false)
+        } else if let screen = NSScreen.main {
             let cascade = CGFloat(pins.count % 6) * 24
             let size = win.frame.size
             let origin = NSPoint(x: screen.visibleFrame.maxX - size.width - 40 - cascade,
@@ -61,15 +66,15 @@ final class PinWindow: NSWindow {
     private let imageView: PinImageView
     private var zoom: CGFloat = 1
 
-    init(image: NSImage) {
+    /// `fitToScreen`: shrink oversized images (e.g. pinned from the clipboard)
+    /// to 90 % of the screen. Screenshots pin at their true 100 % size.
+    init(image: NSImage, fitToScreen: Bool = true) {
         self.pinImage = image
         imageView = PinImageView(image: image)
-        // Open at a sensible size: point size of the image, capped to ~60% of
-        // the screen so a full-screen pin doesn't bury the desktop.
         var size = image.size
-        if let screen = NSScreen.main {
-            let cap = NSSize(width: screen.visibleFrame.width * 0.6,
-                             height: screen.visibleFrame.height * 0.6)
+        if fitToScreen, let screen = NSScreen.main {
+            let cap = NSSize(width: screen.visibleFrame.width * 0.9,
+                             height: screen.visibleFrame.height * 0.9)
             let factor = min(1, cap.width / size.width, cap.height / size.height)
             size = NSSize(width: (size.width * factor).rounded(),
                           height: (size.height * factor).rounded())

@@ -391,7 +391,7 @@ final class ScreenshotOverlayController {
         case .save:
             ScreenshotFileIO.save(image: image, suggestedName: ScreenshotFileIO.defaultName())
         case .pin:
-            PinWindowController.shared.pin(image: image)
+            PinWindowController.shared.pin(image: image, at: globalRect)
         case .edit:
             ScreenshotEditorController.shared.present(image: image)
         case .scrolling:
@@ -429,7 +429,7 @@ final class ScreenshotOverlayController {
         }
     }
 
-    fileprivate func finishEdited(image: NSImage, action: ShotAction) {
+    fileprivate func finishEdited(image: NSImage, action: ShotAction, globalRect: CGRect? = nil) {
         dismiss()
         switch action {
         case .copy:
@@ -438,7 +438,7 @@ final class ScreenshotOverlayController {
         case .save:
             ScreenshotFileIO.save(image: image, suggestedName: ScreenshotFileIO.defaultName())
         case .pin:
-            PinWindowController.shared.pin(image: image)
+            PinWindowController.shared.pin(image: image, at: globalRect)
         default:
             break
         }
@@ -475,8 +475,9 @@ private final class ShotOverlayWindow: NSWindow {
             if action == .cancel { self?.overlayDelegate?.cancel() }
             else { self?.overlayDelegate?.finish(globalRect: rect, action: action) }
         }
-        view.onEditedAction = { [weak self] image, action in
-            self?.overlayDelegate?.finishEdited(image: image, action: action)
+        view.onEditedAction = { [weak self, weak view] image, action in
+            self?.overlayDelegate?.finishEdited(image: image, action: action,
+                                                globalRect: view?.selectionGlobalRect)
         }
         shotView = view
         contentView = view
@@ -506,6 +507,11 @@ final class ShotOverlayView: NSView {
     var onCopySelectionInSession: (() -> Void)?
     var onSelectionStateChanged: (() -> Void)?
     var hasLockedSelection: Bool { locked && hasSelection }
+    /// The locked selection in global Cocoa coordinates (pins open over it).
+    var selectionGlobalRect: CGRect? {
+        guard hasLockedSelection else { return nil }
+        return currentRect.integral.offsetBy(dx: screenGlobalFrame.origin.x, dy: screenGlobalFrame.origin.y)
+    }
 
     private let frozen: ScreenshotCapture.FrozenDisplay
     private let scrollingMode: Bool
