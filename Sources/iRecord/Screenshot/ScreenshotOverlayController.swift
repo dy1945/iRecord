@@ -531,6 +531,8 @@ final class ShotOverlayView: NSView {
     private var locked = false
     private var mouse: CGPoint = .zero
     private var toolbar: ShotToolbarView?
+    /// Where the user dragged the toolbar to; nil = automatic placement.
+    private var toolbarUserOrigin: NSPoint?
     /// In-place annotation (iShot 截屏编辑): the editor canvas covers the
     /// frozen screen as soon as the selection locks; the merged toolbar below
     /// the selection offers tools, a colour picker and the finish actions.
@@ -859,7 +861,9 @@ final class ShotOverlayView: NSView {
     }
 
     func cursor(at point: CGPoint) -> NSCursor {
-        if let toolbar, !toolbar.isHidden, toolbar.frame.contains(point) { return .arrow }
+        if let toolbar, !toolbar.isHidden, toolbar.frame.contains(point) {
+            return toolbar.isGrip(at: convert(point, to: toolbar)) ? .openHand : .arrow
+        }
         if isOutsideSelection(at: point) { return ShotSelectionCursor.outsideCursor }
         guard locked, hasSelection else { return ShotSelectionCursor.cursor }
         let hit = ShotSelectionGeometry.hitTest(point, in: currentRect)
@@ -1008,19 +1012,37 @@ final class ShotOverlayView: NSView {
         }
         if !scrollingMode { ensureEditor() }
         if toolbar == nil {
-            let tb = ShotToolbarView(editor: editorView, scrollingMode: scrollingMode) { [weak self] action in
+            let tb = ShotToolbarView(editor: editorView, scrollingMode: scrollingMode,
+                                     movable: true) { [weak self] action in
                 self?.commitSelection()
                 self?.confirm(action)
+            }
+            tb.onMoved = { [weak self] origin in
+                self?.toolbarUserOrigin = origin
+                self?.window?.invalidateCursorRects(for: tb)
             }
             addSubview(tb)
             toolbar = tb
         }
         let size = toolbar!.fittingSize
-        var y = currentRect.minY - size.height - 12
-        if y < 12 { y = currentRect.minY + 12 }
-        var x = currentRect.maxX - size.width
-        x = max(12, min(x, bounds.width - size.width - 12))
-        toolbar!.frame = NSRect(x: x, y: y, width: size.width, height: size.height)
+        let margin: CGFloat = 12
+        var origin: NSPoint
+        if let placed = toolbarUserOrigin {
+            origin = placed
+        } else {
+            // Below the selection; above it when there's no room; inside its
+            // bottom edge only when neither fits (e.g. a full-screen shot) —
+            // then the grip lets the user drag the bar out of the way.
+            var y = currentRect.minY - size.height - margin
+            if y < margin {
+                let above = currentRect.maxY + margin
+                y = above + size.height <= bounds.height - margin ? above : currentRect.minY + margin
+            }
+            origin = NSPoint(x: currentRect.maxX - size.width, y: y)
+        }
+        origin.x = max(margin, min(origin.x, bounds.width - size.width - margin))
+        origin.y = max(margin, min(origin.y, bounds.height - size.height - margin))
+        toolbar!.frame = NSRect(origin: origin, size: size)
         toolbar!.isHidden = false
     }
 
@@ -1084,6 +1106,7 @@ final class ShotOverlayView: NSView {
         editorView = nil
         toolbar?.removeFromSuperview()
         toolbar = nil
+        toolbarUserOrigin = nil
     }
 
     // MARK: Drawing
@@ -1270,8 +1293,15 @@ final class ShotToolbarView: NSView {
     /// `captureActions` adds the buttons that only make sense on a live
     /// selection (scrolling capture, OCR); the standalone editor window omits
     /// them. `saveTip` overrides the save button's tooltip (e.g. Update Pin).
+    /// Called with the new origin (superview coords) after the user drags a
+    /// `movable` toolbar.
+    var onMoved: ((NSPoint) -> Void)?
+    private let movable: Bool
+    private var grip: ToolbarGripView?
+    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
+
     init(editor: AnnotationEditorView?, scrollingMode: Bool, captureActions: Bool = true,
-         saveTip: String? = nil, onAction: @escaping (ShotAction) -> Void) {
+         saveTip: String? = nil, movable: Bool = false, onAction: @escaping (ShotAction) -> Void) {
         func iconButton(_ symbol: String, _ tip: String, tinted tint: NSColor = .labelColor,
                         _ handler: @escaping () -> Void) -> NSButton {
             let b = OverlayHandlerButton(handler: handler)
@@ -1363,6 +1393,20 @@ final class ShotToolbarView: NSView {
             views.append(iconButton("xmark", L10n.tr("Cancel (Esc)", "取消 (Esc)"), tinted: .systemRed) { onAction(.cancel) })
         }
 
+        // Grip at the leading edge: drag it (or any empty part of the bar) to
+        // move the toolbar off the area being annotated.
+        var gripView: ToolbarGripView?
+        if movable {
+            let g = ToolbarGripView()
+            g.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                g.widthAnchor.constraint(equalToConstant: 12),
+                g.heightAnchor.constraint(equalToConstant: 38)
+            ])
+            views.insert(g, at: 0)
+            gripView = g
+        }
+
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal
         stack.spacing = 5
@@ -1370,8 +1414,10 @@ final class ShotToolbarView: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         contentSize = stack.fittingSize
+        self.movable = movable
 
         super.init(frame: NSRect(origin: .zero, size: contentSize))
+        grip = gripView
 
         wantsLayer = true
         layer?.cornerRadius = 14
@@ -1426,6 +1472,59 @@ final class ShotToolbarView: NSView {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .arrow)
+        if let grip { addCursorRect(convert(grip.bounds, from: grip).insetBy(dx: -4, dy: 0), cursor: .openHand) }
+    }
+
+    /// `point` in this view's coordinates.
+    func isGrip(at point: NSPoint) -> Bool {
+        guard let grip else { return false }
+        return convert(grip.bounds, from: grip).insetBy(dx: -4, dy: 0).contains(point)
+    }
+
+    // Clicks between buttons (and on the grip) bubble up here.
+    override func mouseDown(with event: NSEvent) {
+        guard movable, let superview else { return super.mouseDown(with: event) }
+        dragStart = (superview.convert(event.locationInWindow, from: nil), frame.origin)
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = dragStart, let superview else { return }
+        let p = superview.convert(event.locationInWindow, from: nil)
+        let margin: CGFloat = 4
+        var origin = NSPoint(x: start.origin.x + p.x - start.mouse.x,
+                             y: start.origin.y + p.y - start.mouse.y)
+        origin.x = max(margin, min(origin.x, superview.bounds.width - frame.width - margin))
+        origin.y = max(margin, min(origin.y, superview.bounds.height - frame.height - margin))
+        setFrameOrigin(origin)
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let start = dragStart else { return super.mouseUp(with: event) }
+        dragStart = nil
+        // A plain click on the bar keeps automatic placement.
+        if frame.origin != start.origin { onMoved?(frame.origin) }
+        NSCursor.openHand.set()
+    }
+}
+
+/// Six-dot drag handle at the toolbar's leading edge. Never takes the click
+/// itself, so the press reaches the toolbar's drag handling.
+private final class ToolbarGripView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.labelColor.withAlphaComponent(0.45).setFill()
+        let d: CGFloat = 3, gap: CGFloat = 3
+        let x0 = bounds.midX - d - gap / 2
+        let y0 = bounds.midY - (3 * d + 2 * gap) / 2
+        for col in 0..<2 {
+            for row in 0..<3 {
+                let r = NSRect(x: x0 + CGFloat(col) * (d + gap), y: y0 + CGFloat(row) * (d + gap), width: d, height: d)
+                NSBezierPath(ovalIn: r).fill()
+            }
+        }
     }
 }
 
