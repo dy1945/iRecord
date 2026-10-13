@@ -55,6 +55,7 @@ final class ClickHighlighter {
 
     private func makeOverlay(for screen: NSScreen) -> NSWindow {
         let window = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
         window.ignoresMouseEvents = true

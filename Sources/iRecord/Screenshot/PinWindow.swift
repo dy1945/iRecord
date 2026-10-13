@@ -81,6 +81,10 @@ final class PinWindow: NSWindow {
         }
         super.init(contentRect: NSRect(origin: .zero, size: size),
                    styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
+        // Swift owns this window (PinWindowController.pins). AppKit's default
+        // release-on-close would free it a second time when the pin closes —
+        // an over-release that crashed in the next autorelease pool drain.
+        isReleasedWhenClosed = false
         isOpaque = false
         backgroundColor = .clear
         level = .floating

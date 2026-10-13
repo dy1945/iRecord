@@ -459,6 +459,7 @@ private final class ShotOverlayWindow: NSWindow {
 
     init(screen: NSScreen, frozen: ScreenshotCapture.FrozenDisplay, scrolling: Bool) {
         super.init(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
         setFrame(screen.frame, display: true)
         isOpaque = false
         backgroundColor = .clear

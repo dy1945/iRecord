@@ -72,6 +72,7 @@ private final class SelectionWindow: NSWindow {
     init(screen: NSScreen, isPrimary: Bool) {
         selectionView = SelectionView(isPrimary: isPrimary)
         super.init(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
         self.setFrame(screen.frame, display: true)
         self.isOpaque = false
         self.backgroundColor = .clear

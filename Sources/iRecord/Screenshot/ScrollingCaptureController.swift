@@ -232,6 +232,7 @@ final class ScrollingCaptureController {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 40),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
         panel.level = .screenSaver
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -307,6 +308,7 @@ final class ScrollingCaptureController {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
         panel.level = .screenSaver
         panel.isOpaque = false
         panel.backgroundColor = .black.withAlphaComponent(0.8)
